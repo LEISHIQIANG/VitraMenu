@@ -1,0 +1,25 @@
+# Visual Studio
+.vs/
+.vscode/
+*.user
+*.suo
+*.aps
+
+# 构建输出
+build/
+buildcheck/
+buildverify/
+x64/
+Debug/
+Release/
+*.obj
+*.ilk
+*.iobj
+*.pdb
+*.log
+*.recipe
+*.res
+*.FileListAbsolute.txt
+
+# 二进制工具
+handle64.exe
