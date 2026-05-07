@@ -16,7 +16,7 @@ Windows 右键菜单增强工具，为文件资源管理器添加实用功能。
 | Clear Read-only | 清除只读属性 | 清除只读属性 | 文件 & 文件夹 |
 | Super Delete | 超级删除 | 使用 Git Bash 强制删除（需 Git for Windows） | 文件 & 文件夹 |
 | Firewall Rules | 防火墙规则 | 设置防火墙入站/出站规则（需管理员） | .exe 文件 |
-| Create Date Folder | 创建日期文件夹 | 创建以今日日期命名的文件夹 | 文件夹背景 |
+| Create Date Folder | 创建日期文件夹 | 创建以今日日期命名的文件夹（格式：YYYY_MM_DD） | 文件夹背景 |
 | Extract Structure | 提取目录结构 | 将目录树结构导出为 .txt | 文件夹 |
 | Extract All Files | 提取所有文件 | 将子文件夹中的文件平铺到当前目录 | 文件夹 |
 | Clean Empty Folders | 清理空文件夹 | 递归删除所有空文件夹 | 文件夹 |
