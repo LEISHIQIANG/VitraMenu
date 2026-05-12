@@ -17,7 +17,7 @@ public:
     static bool CleanEmptyFolders(const std::wstring& folderPath);
 
     // -- System Utilities --
-    static bool UnlockFile(const std::wstring& filePath);
+    static bool UnlockFile(const std::wstring& filePath, std::wstring* batchMessage = nullptr);
     static bool ConvertEncoding(const std::wstring& filePath, const std::wstring& encoding);
     static bool SuperDelete(const std::wstring& targetPath);
 
@@ -34,7 +34,8 @@ public:
     static bool ApplyExeFirewallRule(const std::wstring& exePath, bool inbound, bool allow, bool silent = false);
     static void EnsureSelfFirewallBlocked();
     static bool IsFirewallRuleApplied(const std::wstring& exePath, bool inbound);
-    static bool CopyFileHash(const std::wstring& filePath, const std::wstring& algorithm);
+    static bool CopyFileHash(const std::wstring& filePath, const std::wstring& algorithm,
+                             std::wstring* resultMessage = nullptr);
     static bool TakeOwnership(const std::wstring& path);
     static bool ClearReadOnlyAttribute(const std::wstring& path);
 

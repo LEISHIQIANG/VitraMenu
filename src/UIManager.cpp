@@ -379,6 +379,10 @@ static std::map<std::wstring, TranslationEntry> g_translations = {
     { L"SHA-256", { L"SHA-256", L"SHA-256" } },
 };
 
+static std::wstring CountSuffix(Language language) {
+    return (language == Language::CN) ? L" \u9879\u3002" : L" item(s).";
+}
+
 std::wstring UIManager::GetString(const std::wstring& key) {
     auto it = g_translations.find(key);
     if (it == g_translations.end()) return key;
@@ -485,6 +489,7 @@ void UIManager::BuildMenuItems() {
         item.resId = IDI_ICON_HASH;
         item.icon = exePath + L",-" + std::to_wstring(item.resId);
         item.scope = RegistryManager::Files;
+        item.multiSelectModel = L"Single";
         item.subItems = {
             { L"MD5",    L"/hash md5",    L"" },
             { L"SHA-1",  L"/hash sha1",  L"" },
@@ -1413,7 +1418,8 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
     };
 
     if (item.hasSubMenu) {
-        bool parentOk = RegistryManager::CreateParentMenu(item.keyName, item.scope, item.icon, item.appliesTo, localizedName);
+        bool parentOk = RegistryManager::CreateParentMenu(item.keyName, item.scope, item.icon, item.appliesTo,
+                                                          localizedName, item.multiSelectModel);
         FeatureManager::LogResult(L"InstallParent", localizedName, parentOk);
 
         bool allOk = parentOk;
@@ -1421,7 +1427,8 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
         for (const auto& sub : item.subItems) {
             std::wstring subLocName = GetString(sub.keyName);
             std::wstring cmd = BuildCommandLine(exe, sub.command, useBackgroundPath);
-            bool res = RegistryManager::InstallSubMenuItem(item.keyName, sub.keyName, cmd, item.scope, sub.icon, subLocName);
+            bool res = RegistryManager::InstallSubMenuItem(item.keyName, sub.keyName, cmd, item.scope, sub.icon,
+                                                           subLocName, item.multiSelectModel);
             FeatureManager::LogResult(L"InstallSub", subLocName, res, L"Cmd: " + cmd);
             allOk = allOk && res;
         }
@@ -1432,8 +1439,10 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
     if (item.scope == RegistryManager::DirAndBackground) {
         std::wstring cmdBg = BuildLeafItemCommand(item, exe, RegistryManager::Background);
         std::wstring cmdDir = BuildLeafItemCommand(item, exe, RegistryManager::Directory);
-        bool resBg = RegistryManager::InstallContextMenuItem(item.keyName, cmdBg, RegistryManager::Background, item.icon, L"", item.appliesTo, localizedName);
-        bool resDir = RegistryManager::InstallContextMenuItem(item.keyName, cmdDir, RegistryManager::Directory, item.icon, L"", item.appliesTo, localizedName);
+        bool resBg = RegistryManager::InstallContextMenuItem(item.keyName, cmdBg, RegistryManager::Background, item.icon,
+                                                             L"", item.appliesTo, localizedName, item.multiSelectModel);
+        bool resDir = RegistryManager::InstallContextMenuItem(item.keyName, cmdDir, RegistryManager::Directory, item.icon,
+                                                              L"", item.appliesTo, localizedName, item.multiSelectModel);
         FeatureManager::LogResult(L"InstallItem", localizedName + L" [BG]", resBg, L"Cmd: " + cmdBg);
         FeatureManager::LogResult(L"InstallItem", localizedName + L" [Dir]", resDir, L"Cmd: " + cmdDir);
         addResult(resBg && resDir);
@@ -1443,7 +1452,8 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
     RegistryManager::Scope commandScope =
         (item.scope == RegistryManager::Background) ? RegistryManager::Background : RegistryManager::Directory;
     std::wstring cmd = BuildLeafItemCommand(item, exe, commandScope);
-    bool res = RegistryManager::InstallContextMenuItem(item.keyName, cmd, item.scope, item.icon, L"", item.appliesTo, localizedName);
+    bool res = RegistryManager::InstallContextMenuItem(item.keyName, cmd, item.scope, item.icon, L"", item.appliesTo,
+                                                       localizedName, item.multiSelectModel);
     FeatureManager::LogResult(L"InstallItem", localizedName, res, L"Cmd: " + cmd);
     addResult(res);
     return res;
@@ -1466,7 +1476,7 @@ void UIManager::DoInstall() {
     } else if (fail > 0) {
         m_statusText = GetString(L"StatusFailed");
     } else {
-        m_statusText = GetString(L"StatusInstalled") + L" " + std::to_wstring(count) + L" item(s).";
+        m_statusText = GetString(L"StatusInstalled") + L" " + std::to_wstring(count) + CountSuffix(m_language);
     }
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
@@ -1488,7 +1498,7 @@ void UIManager::DoReinstall() {
     } else if (fail > 0) {
         m_statusText = GetString(L"StatusFailed");
     } else {
-        m_statusText = GetString(L"StatusReinstalled") + L" " + std::to_wstring(count) + L" item(s).";
+        m_statusText = GetString(L"StatusReinstalled") + L" " + std::to_wstring(count) + CountSuffix(m_language);
     }
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
@@ -1537,7 +1547,7 @@ void UIManager::DoUninstall() {
     } else if (fail > 0) {
         m_statusText = GetString(L"StatusFailed");
     } else {
-        m_statusText = GetString(L"StatusUninstalled") + L" " + std::to_wstring(success) + L" item(s).";
+        m_statusText = GetString(L"StatusUninstalled") + L" " + std::to_wstring(success) + CountSuffix(m_language);
     }
     InvalidateRect(m_hwnd, NULL, FALSE);
 }

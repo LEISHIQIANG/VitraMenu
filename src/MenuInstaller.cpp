@@ -91,10 +91,10 @@ bool MenuInstaller::InstallAllMenus(const std::wstring& rawPath) {
     RegistryManager::InstallSubMenuItem(L"Firewall Rules", L"Allow outbound", exePath + L" /fw_out_allow \"%1\"", RegistryManager::Files, rawPath + L",-319");
     RegistryManager::InstallSubMenuItem(L"Firewall Rules", L"Allow inbound", exePath + L" /fw_in_allow \"%1\"", RegistryManager::Files, rawPath + L",-319");
 
-    RegistryManager::CreateParentMenu(L"File Hash", RegistryManager::Files, rawPath + L",-306");
-    RegistryManager::InstallSubMenuItem(L"File Hash", L"MD5", exePath + L" /hash md5 \"%1\"", RegistryManager::Files, rawPath + L",-306");
-    RegistryManager::InstallSubMenuItem(L"File Hash", L"SHA-1", exePath + L" /hash sha1 \"%1\"", RegistryManager::Files, rawPath + L",-306");
-    RegistryManager::InstallSubMenuItem(L"File Hash", L"SHA-256", exePath + L" /hash sha256 \"%1\"", RegistryManager::Files, rawPath + L",-306");
+    RegistryManager::CreateParentMenu(L"File Hash", RegistryManager::Files, rawPath + L",-306", L"", L"", L"Single");
+    RegistryManager::InstallSubMenuItem(L"File Hash", L"MD5", exePath + L" /hash md5 \"%1\"", RegistryManager::Files, rawPath + L",-306", L"", L"Single");
+    RegistryManager::InstallSubMenuItem(L"File Hash", L"SHA-1", exePath + L" /hash sha1 \"%1\"", RegistryManager::Files, rawPath + L",-306", L"", L"Single");
+    RegistryManager::InstallSubMenuItem(L"File Hash", L"SHA-256", exePath + L" /hash sha256 \"%1\"", RegistryManager::Files, rawPath + L",-306", L"", L"Single");
 
     return true;
 }

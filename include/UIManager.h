@@ -26,6 +26,7 @@ struct MenuItemUI {
     std::wstring icon;                        // Icon string
     std::wstring badge;                       // Small label, e.g. "NEW" "PRO"
     std::wstring appliesTo;                   // AppliesTo registry filter, e.g. ".exe OR .lnk"
+    std::wstring multiSelectModel;            // Explorer MultiSelectModel value, e.g. "Single"
     int resId               = 0;
 
     // UI state

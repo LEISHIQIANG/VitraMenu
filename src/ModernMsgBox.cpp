@@ -1,5 +1,6 @@
 #include "../include/ModernMsgBox.h"
 #include "../include/ModernUI.h"
+#include "../include/Localization.h"
 
 bool ModernMsgBox::s_suppressed = false;
 
@@ -16,6 +17,7 @@ struct MsgBoxData {
     std::wstring title;
     UINT type;
     int result = IDCANCEL;
+    bool done = false;
     
     RECT btn1; std::wstring btn1Text; bool hover1 = false; int ret1 = IDOK;
     RECT btn2; std::wstring btn2Text; bool hover2 = false; int ret2 = IDCANCEL;
@@ -100,17 +102,18 @@ static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
+        pData->done = true;
         return 0;
     }
     return DefWindowProcW(hwnd, uMsg, wParam, lParam);
 }
 
 int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring& title, UINT type) {
-    if (s_suppressed) {
-        // Return appropriate default based on type
-        if ((type & MB_YESNO) == MB_YESNO) return IDYES;
-        return IDOK;
+    if (s_suppressed && (type & MB_YESNO) != MB_YESNO) {
+        const UINT icon = type & (MB_ICONERROR | MB_ICONWARNING | MB_ICONQUESTION | MB_ICONINFORMATION);
+        if (icon == 0 || icon == MB_ICONINFORMATION) {
+            return IDOK;
+        }
     }
 
     ModernUI::Initialize(); // Ensure GDI+ is loaded (it uses ref counting internally if we designed it right, but actually we use a global token. GdiplusStartup handles multiple calls safely if matched by GdiplusShutdown, but our simple Initialize does not track counts. Fortunately, calling it again is mostly harmless or we can skip it since the main process already runs it before any message box triggers).
@@ -160,13 +163,16 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
 
     if ((type & MB_YESNO) == MB_YESNO) {
         data.hasBtn2 = true;
-        data.btn1Text = L"Yes"; data.ret1 = IDYES;
-        data.btn2Text = L"No";  data.ret2 = IDNO;
+        data.btn1Text = VitraLocalization::PickString(L"Yes", L"\u662f");
+        data.ret1 = IDYES;
+        data.btn2Text = VitraLocalization::PickString(L"No", L"\u5426");
+        data.ret2 = IDNO;
 
         data.btn1 = { clientW - 16 - btnW, btnY, clientW - 16, btnY + btnH };
         data.btn2 = { clientW - 16 - btnW*2 - 8, btnY, clientW - 16 - btnW - 8, btnY + btnH };
     } else {
-        data.btn1Text = L"OK"; data.ret1 = IDOK;
+        data.btn1Text = VitraLocalization::PickString(L"OK", L"\u786e\u5b9a");
+        data.ret1 = IDOK;
         data.btn1 = { clientW - 16 - btnW, btnY, clientW - 16, btnY + btnH };
     }
 
@@ -206,7 +212,7 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
     
     // Modal loop
     MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0)) {
+    while (!data.done && GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

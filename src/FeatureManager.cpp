@@ -6,42 +6,42 @@
 
 #include "../include/FeatureManager.h"
 #include "../include/ModernMsgBox.h"
+#include "../include/Localization.h"
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shellapi.h>
 #include <comdef.h>
 #include <bcrypt.h>
+#include <algorithm>
+#include <atomic>
+#include <cwctype>
+#include <mutex>
 #include <set>
+#include <thread>
+#include <unordered_set>
 #include <vector>
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "ole32.lib")
 
-// --- Localization ---
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#endif
 
-enum class Lang { EN, CN };
+// --- Localization ---
 
 struct MsgText {
     const wchar_t* en;
     const wchar_t* cn;
 };
 
-static Lang GetCurrentLanguage() {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\VitraMenu", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD lang = 0, size = sizeof(lang);
-        if (RegQueryValueExW(hKey, L"Language", NULL, NULL, (LPBYTE)&lang, &size) == ERROR_SUCCESS) {
-            RegCloseKey(hKey);
-            return (lang == 1) ? Lang::CN : Lang::EN;
-        }
-        RegCloseKey(hKey);
-    }
-    return Lang::EN;
+static const wchar_t* T(const MsgText& msg) {
+    return VitraLocalization::IsChinese() ? msg.cn : msg.en;
 }
 
-static const wchar_t* T(const MsgText& msg) {
-    return (GetCurrentLanguage() == Lang::CN) ? msg.cn : msg.en;
+static std::wstring LText(const wchar_t* en, const wchar_t* cn) {
+    return VitraLocalization::IsChinese() ? std::wstring(cn) : std::wstring(en);
 }
 
 // Message translations
@@ -79,7 +79,15 @@ bool FeatureManager::ExecuteCommand(const std::wstring& cmd, bool waitForExit) {
     free(cmdCopy);
 
     if (ok) {
-        if (waitForExit) WaitForSingleObject(pi.hProcess, 30000);
+        if (waitForExit) {
+            DWORD wait = WaitForSingleObject(pi.hProcess, 30000);
+            DWORD exitCode = 1;
+            ok = wait == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == 0;
+            if (wait == WAIT_TIMEOUT) {
+                TerminateProcess(pi.hProcess, 1);
+                WaitForSingleObject(pi.hProcess, 500);
+            }
+        }
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
     }
@@ -123,6 +131,929 @@ bool FeatureManager::ExecuteCommandWithOutput(const std::wstring& cmd, std::wstr
     return true;
 }
 
+namespace {
+
+bool CopyTextToClipboard(const std::wstring& text) {
+    const size_t byteSize = (text.length() + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, byteSize);
+    if (!hMem) return false;
+
+    void* locked = GlobalLock(hMem);
+    if (!locked) {
+        GlobalFree(hMem);
+        return false;
+    }
+    memcpy(locked, text.c_str(), byteSize);
+    GlobalUnlock(hMem);
+
+    bool clipboardOpen = false;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        if (OpenClipboard(nullptr)) {
+            clipboardOpen = true;
+            break;
+        }
+        Sleep(20);
+    }
+    if (!clipboardOpen) {
+        GlobalFree(hMem);
+        return false;
+    }
+
+    bool ok = false;
+    EmptyClipboard();
+    if (SetClipboardData(CF_UNICODETEXT, hMem)) {
+        ok = true;
+        hMem = nullptr;
+    }
+    CloseClipboard();
+    if (hMem) GlobalFree(hMem);
+    return ok;
+}
+
+bool ExecuteCommandWithOutputTimeout(const std::wstring& cmd, std::wstring& output,
+                                     const std::atomic<DWORD>& timeoutMs) {
+    output.clear();
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE hRead = nullptr, hWrite = nullptr;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return false;
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;
+
+    wchar_t* cmdCopy = _wcsdup(cmd.c_str());
+    bool ok = CreateProcessW(NULL, cmdCopy, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    free(cmdCopy);
+    CloseHandle(hWrite);
+
+    if (!ok) {
+        CloseHandle(hRead);
+        return false;
+    }
+
+    std::string buf;
+    buf.reserve(4096);
+    DWORD start = GetTickCount();
+    bool exited = false;
+    char tmp[4096];
+
+    for (;;) {
+        DWORD avail = 0;
+        while (PeekNamedPipe(hRead, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+            DWORD read = 0;
+            DWORD want = std::min<DWORD>(avail, sizeof(tmp) - 1);
+            if (!ReadFile(hRead, tmp, want, &read, nullptr) || read == 0) break;
+            tmp[read] = 0;
+            buf.append(tmp, tmp + read);
+            avail -= read;
+        }
+
+        if (exited) break;
+
+        DWORD wait = WaitForSingleObject(pi.hProcess, 20);
+        if (wait == WAIT_OBJECT_0) {
+            exited = true;
+            continue;
+        }
+
+        DWORD limit = timeoutMs.load();
+        if (limit == 0 || GetTickCount() - start >= limit) {
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 500);
+            break;
+        }
+    }
+
+    CloseHandle(hRead);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    int wlen = MultiByteToWideChar(CP_ACP, 0, buf.c_str(), static_cast<int>(buf.size()), NULL, 0);
+    if (wlen > 0) {
+        output.resize(wlen);
+        MultiByteToWideChar(CP_ACP, 0, buf.c_str(), static_cast<int>(buf.size()), &output[0], wlen);
+    }
+    return exited;
+}
+
+std::wstring ToLowerKey(const std::wstring& s) {
+    std::wstring out = s;
+    for (wchar_t& c : out) {
+        c = static_cast<wchar_t>(towlower(c));
+    }
+    return out;
+}
+
+std::wstring GetSystemExecutable(const wchar_t* fileName) {
+    wchar_t systemDir[MAX_PATH] = {};
+    if (GetSystemDirectoryW(systemDir, MAX_PATH)) {
+        std::wstring path = std::wstring(systemDir) + L"\\" + fileName;
+        if (FeatureManager::FileExists(path)) return path;
+    }
+    return fileName;
+}
+
+std::wstring GetWindowsExecutable(const wchar_t* fileName) {
+    wchar_t windowsDir[MAX_PATH] = {};
+    if (GetWindowsDirectoryW(windowsDir, MAX_PATH)) {
+        std::wstring path = std::wstring(windowsDir) + L"\\" + fileName;
+        if (FeatureManager::FileExists(path)) return path;
+    }
+    return GetSystemExecutable(fileName);
+}
+
+std::wstring GetPowerShellExecutable() {
+    wchar_t systemDir[MAX_PATH] = {};
+    if (GetSystemDirectoryW(systemDir, MAX_PATH)) {
+        std::wstring path = std::wstring(systemDir) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+        if (FeatureManager::FileExists(path)) return path;
+    }
+    return L"powershell.exe";
+}
+
+std::wstring QuoteForCommandLine(const std::wstring& s) {
+    std::wstring out = L"\"";
+    for (wchar_t c : s) {
+        if (c == L'"') out += L"\\\"";
+        else out += c;
+    }
+    out += L"\"";
+    return out;
+}
+
+std::wstring EscapePowerShellSingleQuoted(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size() + 8);
+    for (wchar_t c : s) {
+        if (c == L'\'') out += L"''";
+        else out += c;
+    }
+    return out;
+}
+
+bool ReadWholeFileBytes(const std::wstring& path, std::vector<BYTE>& bytes) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart > 0x7fffffff) {
+        CloseHandle(h);
+        return false;
+    }
+
+    bytes.resize(static_cast<size_t>(size.QuadPart));
+    DWORD total = 0;
+    while (total < static_cast<DWORD>(bytes.size())) {
+        DWORD read = 0;
+        DWORD want = static_cast<DWORD>(bytes.size()) - total;
+        if (!ReadFile(h, bytes.data() + total, want, &read, nullptr)) {
+            CloseHandle(h);
+            return false;
+        }
+        if (read == 0) break;
+        total += read;
+    }
+    CloseHandle(h);
+    bytes.resize(total);
+    return true;
+}
+
+bool DecodeBytesLikeStreamReaderDefault(const std::vector<BYTE>& bytes, std::wstring& text) {
+    text.clear();
+    if (bytes.empty()) return true;
+
+    UINT codePage = CP_ACP;
+    size_t offset = 0;
+    enum class WideKind { None, Utf16Le, Utf16Be, Utf32Le, Utf32Be } wideKind = WideKind::None;
+
+    if (bytes.size() >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00) {
+        wideKind = WideKind::Utf32Le;
+        offset = 4;
+    } else if (bytes.size() >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0xFE && bytes[3] == 0xFF) {
+        wideKind = WideKind::Utf32Be;
+        offset = 4;
+    } else if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+        codePage = CP_UTF8;
+        offset = 3;
+    } else if (bytes.size() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        wideKind = WideKind::Utf16Le;
+        offset = 2;
+    } else if (bytes.size() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+        wideKind = WideKind::Utf16Be;
+        offset = 2;
+    }
+
+    if (wideKind != WideKind::None) {
+        if (wideKind == WideKind::Utf32Le || wideKind == WideKind::Utf32Be) {
+            const size_t byteCount = bytes.size() - offset;
+            if ((byteCount % 4) != 0) return false;
+            text.reserve(byteCount / 2);
+
+            auto appendCodePoint = [&](DWORD cp) {
+                if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+                if (cp <= 0xFFFF) {
+                    text.push_back(static_cast<wchar_t>(cp));
+                } else {
+                    cp -= 0x10000;
+                    text.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
+                    text.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
+                }
+            };
+
+            for (size_t i = offset; i < bytes.size(); i += 4) {
+                DWORD cp = 0;
+                if (wideKind == WideKind::Utf32Le) {
+                    cp = static_cast<DWORD>(bytes[i]) |
+                         (static_cast<DWORD>(bytes[i + 1]) << 8) |
+                         (static_cast<DWORD>(bytes[i + 2]) << 16) |
+                         (static_cast<DWORD>(bytes[i + 3]) << 24);
+                } else {
+                    cp = (static_cast<DWORD>(bytes[i]) << 24) |
+                         (static_cast<DWORD>(bytes[i + 1]) << 16) |
+                         (static_cast<DWORD>(bytes[i + 2]) << 8) |
+                         static_cast<DWORD>(bytes[i + 3]);
+                }
+                appendCodePoint(cp);
+            }
+            return true;
+        }
+
+        const size_t byteCount = bytes.size() - offset;
+        if ((byteCount % sizeof(wchar_t)) != 0) return false;
+        const size_t charCount = byteCount / sizeof(wchar_t);
+        text.resize(charCount);
+        if (charCount == 0) return true;
+
+        if (wideKind == WideKind::Utf16Le) {
+            memcpy(&text[0], bytes.data() + offset, byteCount);
+        } else {
+            for (size_t i = 0; i < charCount; ++i) {
+                BYTE hi = bytes[offset + i * 2];
+                BYTE lo = bytes[offset + i * 2 + 1];
+                text[i] = static_cast<wchar_t>((hi << 8) | lo);
+            }
+        }
+        return true;
+    }
+
+    const int cb = static_cast<int>(bytes.size() - offset);
+    if (cb <= 0) return true;
+    int needed = MultiByteToWideChar(codePage, 0,
+                                     reinterpret_cast<LPCCH>(bytes.data() + offset), cb,
+                                     nullptr, 0);
+    if (needed <= 0) return false;
+    text.resize(static_cast<size_t>(needed));
+    return MultiByteToWideChar(codePage, 0,
+                               reinterpret_cast<LPCCH>(bytes.data() + offset), cb,
+                               &text[0], needed) == needed;
+}
+
+bool AppendEncodedTextBytes(const std::wstring& text, const std::wstring& encoding, std::vector<BYTE>& bytes) {
+    bytes.clear();
+
+    auto appendWideLe = [&](bool bom) {
+        if (bom) {
+            bytes.push_back(0xFF);
+            bytes.push_back(0xFE);
+        }
+        const BYTE* raw = reinterpret_cast<const BYTE*>(text.data());
+        bytes.insert(bytes.end(), raw, raw + text.size() * sizeof(wchar_t));
+        return true;
+    };
+
+    if (encoding == L"utf-16le") {
+        return appendWideLe(true);
+    }
+
+    if (encoding == L"utf-16be") {
+        bytes.push_back(0xFE);
+        bytes.push_back(0xFF);
+        for (wchar_t c : text) {
+            bytes.push_back(static_cast<BYTE>((c >> 8) & 0xff));
+            bytes.push_back(static_cast<BYTE>(c & 0xff));
+        }
+        return true;
+    }
+
+    UINT codePage = (encoding == L"ansi") ? CP_ACP : CP_UTF8;
+    if (encoding == L"utf-8-bom") {
+        bytes.push_back(0xEF);
+        bytes.push_back(0xBB);
+        bytes.push_back(0xBF);
+    } else if (encoding != L"utf-8" && encoding != L"ansi") {
+        return false;
+    }
+
+    if (text.empty()) return true;
+    int needed = WideCharToMultiByte(codePage, 0, text.c_str(), static_cast<int>(text.size()),
+                                     nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return false;
+
+    size_t start = bytes.size();
+    bytes.resize(start + static_cast<size_t>(needed));
+    return WideCharToMultiByte(codePage, 0, text.c_str(), static_cast<int>(text.size()),
+                               reinterpret_cast<LPSTR>(bytes.data() + start), needed,
+                               nullptr, nullptr) == needed;
+}
+
+bool WriteWholeFileBytes(const std::wstring& path, const std::vector<BYTE>& bytes) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    DWORD writtenTotal = 0;
+    while (writtenTotal < static_cast<DWORD>(bytes.size())) {
+        DWORD written = 0;
+        DWORD want = static_cast<DWORD>(bytes.size()) - writtenTotal;
+        if (!WriteFile(h, bytes.data() + writtenTotal, want, &written, nullptr)) {
+            CloseHandle(h);
+            return false;
+        }
+        if (written == 0 && want != 0) {
+            CloseHandle(h);
+            return false;
+        }
+        writtenTotal += written;
+    }
+
+    CloseHandle(h);
+    return true;
+}
+
+bool ConvertEncodingNativeEquivalent(const std::wstring& filePath, const std::wstring& encoding) {
+    std::vector<BYTE> bytes;
+    std::wstring text;
+    std::vector<BYTE> encoded;
+    return ReadWholeFileBytes(filePath, bytes) &&
+           DecodeBytesLikeStreamReaderDefault(bytes, text) &&
+           AppendEncodedTextBytes(text, encoding, encoded) &&
+           WriteWholeFileBytes(filePath, encoded);
+}
+
+bool FindEmptyFoldersOnePass(const std::wstring& path, std::vector<std::wstring>& emptyFolders, bool& scanOk) {
+    WIN32_FIND_DATAW fd;
+    std::wstring pattern = path + L"\\*";
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        scanOk = false;
+        return true;
+    }
+
+    bool hasAnyEntry = false;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        hasAnyEntry = true;
+
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            std::wstring subPath = path + L"\\" + fd.cFileName;
+            bool childHasAnyEntry = FindEmptyFoldersOnePass(subPath, emptyFolders, scanOk);
+            if (!childHasAnyEntry) {
+                emptyFolders.push_back(subPath);
+            }
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    DWORD findError = GetLastError();
+    FindClose(hFind);
+    if (findError != ERROR_NO_MORE_FILES) scanOk = false;
+    return hasAnyEntry;
+}
+
+void BuildExistingFileNameCache(const std::wstring& dir, std::unordered_set<std::wstring>& files) {
+    WIN32_FIND_DATAW fd;
+    std::wstring pattern = dir + L"\\*";
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            files.insert(ToLowerKey(fd.cFileName));
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+}
+
+std::wstring MakeUniqueDestinationPath(const std::wstring& destDir, const std::wstring& fileName,
+                                       std::unordered_set<std::wstring>& existingFiles) {
+    std::wstring dest = destDir + L"\\" + fileName;
+    if (existingFiles.find(ToLowerKey(fileName)) == existingFiles.end()) {
+        return dest;
+    }
+
+    size_t dot = fileName.find_last_of(L".");
+    std::wstring base = (dot != std::wstring::npos) ? fileName.substr(0, dot) : fileName;
+    std::wstring ext = (dot != std::wstring::npos) ? fileName.substr(dot) : L"";
+    int idx = 2;
+    do {
+        std::wstring candidateName = base + L"_(" + std::to_wstring(idx++) + L")" + ext;
+        dest = destDir + L"\\" + candidateName;
+        if (existingFiles.find(ToLowerKey(candidateName)) == existingFiles.end()) break;
+    } while (idx < 100);
+    return dest;
+}
+
+bool ExtractAllFilesRecursiveCached(const std::wstring& srcDir, const std::wstring& destDir,
+                                    std::vector<std::wstring>& moved,
+                                    std::unordered_set<std::wstring>& existingFiles) {
+    WIN32_FIND_DATAW fd;
+    std::wstring searchPath = srcDir + L"\\*";
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    bool allOk = true;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        std::wstring fullPath = srcDir + L"\\" + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!ExtractAllFilesRecursiveCached(fullPath, destDir, moved, existingFiles)) {
+                allOk = false;
+            }
+            if (!RemoveDirectoryW(fullPath.c_str()) && GetLastError() != ERROR_DIR_NOT_EMPTY) {
+                allOk = false;
+            }
+        } else {
+            std::wstring dest = destDir + L"\\" + fd.cFileName;
+            if (dest != fullPath) {
+                dest = MakeUniqueDestinationPath(destDir, fd.cFileName, existingFiles);
+                if (MoveFileW(fullPath.c_str(), dest.c_str())) {
+                    moved.push_back(dest);
+                    size_t pos = dest.find_last_of(L"\\/");
+                    std::wstring finalName = (pos != std::wstring::npos) ? dest.substr(pos + 1) : dest;
+                    existingFiles.insert(ToLowerKey(finalName));
+                } else {
+                    allOk = false;
+                }
+            }
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    DWORD findError = GetLastError();
+    if (findError != ERROR_NO_MORE_FILES) allOk = false;
+    FindClose(hFind);
+    return allOk;
+}
+
+struct ClearReadOnlyStats {
+    DWORD visited = 0;
+    DWORD changed = 0;
+    DWORD failed = 0;
+    DWORD lastError = ERROR_SUCCESS;
+};
+
+void MarkClearReadOnlyFailure(ClearReadOnlyStats& stats, DWORD error) {
+    stats.failed++;
+    if (error != ERROR_SUCCESS) stats.lastError = error;
+}
+
+bool ClearReadOnlyRecursiveNative(const std::wstring& path, ClearReadOnlyStats& stats) {
+    DWORD attr = GetFileAttributesW(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        MarkClearReadOnlyFailure(stats, GetLastError());
+        return false;
+    }
+
+    stats.visited++;
+
+    if (attr & FILE_ATTRIBUTE_READONLY) {
+        if (SetFileAttributesW(path.c_str(), attr & ~FILE_ATTRIBUTE_READONLY)) {
+            stats.changed++;
+        } else {
+            MarkClearReadOnlyFailure(stats, GetLastError());
+        }
+    }
+
+    if (!(attr & FILE_ATTRIBUTE_DIRECTORY) || (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        return stats.failed == 0;
+    }
+
+    WIN32_FIND_DATAW fd;
+    std::wstring pattern = path + L"\\*";
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        MarkClearReadOnlyFailure(stats, GetLastError());
+        return false;
+    }
+
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        ClearReadOnlyRecursiveNative(path + L"\\" + fd.cFileName, stats);
+    } while (FindNextFileW(hFind, &fd));
+
+    DWORD findError = GetLastError();
+    if (findError != ERROR_NO_MORE_FILES) {
+        MarkClearReadOnlyFailure(stats, findError);
+    }
+
+    FindClose(hFind);
+    return stats.failed == 0;
+}
+
+struct LockingProcess {
+    DWORD pid = 0;
+    std::wstring name;
+    std::wstring source;
+};
+
+void AddLockingProcess(std::vector<LockingProcess>& processes, DWORD pid,
+                       const std::wstring& name, const std::wstring& source) {
+    if (pid == 0 || pid == GetCurrentProcessId()) return;
+    for (auto& p : processes) {
+        if (p.pid == pid) {
+            if (p.name.empty() && !name.empty()) p.name = name;
+            if (!source.empty() && p.source.find(source) == std::wstring::npos) {
+                if (!p.source.empty()) p.source += L"+";
+                p.source += source;
+            }
+            return;
+        }
+    }
+    LockingProcess p;
+    p.pid = pid;
+    p.name = name;
+    p.source = source;
+    processes.push_back(p);
+}
+
+constexpr UINT VM_CCH_RM_SESSION_KEY = 32;
+constexpr UINT VM_CCH_RM_MAX_APP_NAME = 255;
+constexpr UINT VM_CCH_RM_MAX_SVC_NAME = 63;
+
+enum VM_RM_APP_TYPE {
+    VmRmUnknownApp = 0,
+    VmRmMainWindow = 1,
+    VmRmOtherWindow = 2,
+    VmRmService = 3,
+    VmRmExplorer = 4,
+    VmRmConsole = 5,
+    VmRmCritical = 1000
+};
+
+struct VM_RM_UNIQUE_PROCESS {
+    DWORD dwProcessId;
+    FILETIME ProcessStartTime;
+};
+
+struct VM_RM_PROCESS_INFO {
+    VM_RM_UNIQUE_PROCESS Process;
+    WCHAR strAppName[VM_CCH_RM_MAX_APP_NAME + 1];
+    WCHAR strServiceShortName[VM_CCH_RM_MAX_SVC_NAME + 1];
+    VM_RM_APP_TYPE ApplicationType;
+    ULONG AppStatus;
+    DWORD TSSessionId;
+    BOOL bRestartable;
+};
+
+using VmRmStartSessionFn = DWORD (WINAPI*)(DWORD*, DWORD, WCHAR[]);
+using VmRmRegisterResourcesFn = DWORD (WINAPI*)(DWORD, UINT, LPCWSTR[], UINT, VM_RM_UNIQUE_PROCESS[], UINT, LPCWSTR[]);
+using VmRmGetListFn = DWORD (WINAPI*)(DWORD, UINT*, UINT*, VM_RM_PROCESS_INFO[], LPDWORD);
+using VmRmEndSessionFn = DWORD (WINAPI*)(DWORD);
+
+bool QueryRestartManagerLocks(const std::wstring& path, std::vector<LockingProcess>& processes) {
+    HMODULE rm = LoadLibraryExW(L"rstrtmgr.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!rm) {
+        wchar_t systemDir[MAX_PATH] = {};
+        if (GetSystemDirectoryW(systemDir, MAX_PATH)) {
+            std::wstring rmPath = std::wstring(systemDir) + L"\\rstrtmgr.dll";
+            rm = LoadLibraryW(rmPath.c_str());
+        }
+    }
+    if (!rm) return false;
+
+    auto rmStartSession = reinterpret_cast<VmRmStartSessionFn>(GetProcAddress(rm, "RmStartSession"));
+    auto rmRegisterResources = reinterpret_cast<VmRmRegisterResourcesFn>(GetProcAddress(rm, "RmRegisterResources"));
+    auto rmGetList = reinterpret_cast<VmRmGetListFn>(GetProcAddress(rm, "RmGetList"));
+    auto rmEndSession = reinterpret_cast<VmRmEndSessionFn>(GetProcAddress(rm, "RmEndSession"));
+    if (!rmStartSession || !rmRegisterResources || !rmGetList || !rmEndSession) {
+        FreeLibrary(rm);
+        return false;
+    }
+
+    DWORD session = 0;
+    WCHAR sessionKey[VM_CCH_RM_SESSION_KEY + 1] = {};
+    DWORD rc = rmStartSession(&session, 0, sessionKey);
+    if (rc != ERROR_SUCCESS) {
+        FreeLibrary(rm);
+        return false;
+    }
+
+    LPCWSTR resources[] = { path.c_str() };
+    rc = rmRegisterResources(session, 1, resources, 0, nullptr, 0, nullptr);
+    if (rc != ERROR_SUCCESS) {
+        rmEndSession(session);
+        FreeLibrary(rm);
+        return false;
+    }
+
+    UINT needed = 0;
+    UINT count = 0;
+    DWORD reason = 0;
+    rc = rmGetList(session, &needed, &count, nullptr, &reason);
+    if (rc == ERROR_MORE_DATA && needed > 0) {
+        std::vector<VM_RM_PROCESS_INFO> info(needed);
+        count = needed;
+        rc = rmGetList(session, &needed, &count, info.data(), &reason);
+        if (rc == ERROR_SUCCESS) {
+            for (UINT i = 0; i < count; ++i) {
+                AddLockingProcess(processes, info[i].Process.dwProcessId, info[i].strAppName, L"Restart Manager");
+            }
+        }
+    }
+
+    rmEndSession(session);
+    FreeLibrary(rm);
+    return rc == ERROR_SUCCESS;
+}
+
+void ParseHandleOutput(const std::wstring& output, std::vector<LockingProcess>& processes) {
+    const wchar_t* p = output.c_str();
+    while (*p) {
+        const wchar_t* lineEnd = wcschr(p, L'\n');
+        std::wstring line;
+        if (lineEnd) {
+            line.assign(p, lineEnd);
+            p = lineEnd + 1;
+        } else {
+            line = p;
+            p += wcslen(p);
+        }
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+
+        size_t pidPos = line.find(L"pid: ");
+        if (pidPos == std::wstring::npos) continue;
+
+        std::wstring procName = line.substr(0, pidPos);
+        size_t nameEnd = procName.find_last_not_of(L" \t");
+        if (nameEnd != std::wstring::npos) procName = procName.substr(0, nameEnd + 1);
+
+        size_t start = pidPos + 5;
+        size_t end = line.find_first_not_of(L"0123456789", start);
+        std::wstring pidStr = line.substr(start, end - start);
+        if (!pidStr.empty()) {
+            wchar_t* endPtr = nullptr;
+            DWORD pid = wcstoul(pidStr.c_str(), &endPtr, 10);
+            if (endPtr != pidStr.c_str()) {
+                AddLockingProcess(processes, pid, procName, L"handle");
+            }
+        }
+    }
+}
+
+void ParsePowerShellUnlockOutput(const std::wstring& output, std::vector<LockingProcess>& processes) {
+    const wchar_t* p = output.c_str();
+    while (*p) {
+        const wchar_t* lineEnd = wcschr(p, L'\n');
+        std::wstring line;
+        if (lineEnd) {
+            line.assign(p, lineEnd);
+            p = lineEnd + 1;
+        } else {
+            line = p;
+            p += wcslen(p);
+        }
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+
+        size_t pidPos = line.find(L"PID:");
+        if (pidPos == std::wstring::npos) continue;
+        size_t start = pidPos + 4;
+        size_t end = line.find_first_not_of(L"0123456789", start);
+        std::wstring pidStr = line.substr(start, end - start);
+        wchar_t* endPtr = nullptr;
+        DWORD pid = wcstoul(pidStr.c_str(), &endPtr, 10);
+        if (endPtr == pidStr.c_str()) continue;
+
+        std::wstring procName = line.substr(0, pidPos);
+        size_t nameEnd = procName.find_last_not_of(L" (");
+        if (nameEnd != std::wstring::npos) procName = procName.substr(0, nameEnd + 1);
+        AddLockingProcess(processes, pid, procName, L"PowerShell");
+    }
+}
+
+std::wstring BuildProcessInfoText(const std::vector<LockingProcess>& processes) {
+    std::wstring text;
+    for (const auto& p : processes) {
+        std::wstring name = p.name.empty() ? LText(L"Process", L"\u8fdb\u7a0b") : p.name;
+        text += name + L" (PID: " + std::to_wstring(p.pid) + L")";
+        if (!p.source.empty()) text += L" [" + p.source + L"]";
+        text += L"\n";
+    }
+    return text;
+}
+
+bool TerminateProcessByPid(DWORD pid) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    if (!h) return false;
+    BOOL ok = TerminateProcess(h, 1);
+    if (ok) WaitForSingleObject(h, 2000);
+    CloseHandle(h);
+    return ok != FALSE;
+}
+
+std::wstring ShellSingleQuoteForBash(const std::wstring& s) {
+    std::wstring out = L"'";
+    for (wchar_t c : s) {
+        if (c == L'\'') out += L"'\\''";
+        else out += c;
+    }
+    out += L"'";
+    return out;
+}
+
+void AddUniquePath(std::vector<std::wstring>& paths, const std::wstring& path) {
+    if (path.empty()) return;
+    std::wstring normalized = path;
+    while (!normalized.empty() && (normalized.back() == L'\\' || normalized.back() == L'/')) {
+        normalized.pop_back();
+    }
+    if (normalized.empty()) return;
+
+    std::wstring key = ToLowerKey(normalized);
+    for (const auto& existing : paths) {
+        if (ToLowerKey(existing) == key) return;
+    }
+    paths.push_back(normalized);
+}
+
+void AddKnownFolderGitRoot(std::vector<std::wstring>& roots, REFKNOWNFOLDERID folderId) {
+    PWSTR folder = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(folderId, 0, nullptr, &folder)) && folder) {
+        AddUniquePath(roots, std::wstring(folder) + L"\\Git");
+        CoTaskMemFree(folder);
+    }
+}
+
+bool QueryHklmString(const wchar_t* subKey, const wchar_t* valueName, REGSAM view, std::wstring& value) {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subKey, 0, KEY_READ | view, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LSTATUS rc = RegQueryValueExW(hKey, valueName, nullptr, &type, nullptr, &bytes);
+    if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || bytes == 0) {
+        RegCloseKey(hKey);
+        return false;
+    }
+
+    std::vector<wchar_t> buffer(bytes / sizeof(wchar_t) + 2, L'\0');
+    rc = RegQueryValueExW(hKey, valueName, nullptr, &type,
+                          reinterpret_cast<LPBYTE>(buffer.data()), &bytes);
+    RegCloseKey(hKey);
+    if (rc != ERROR_SUCCESS) return false;
+
+    value.assign(buffer.data());
+    if (type == REG_EXPAND_SZ) {
+        DWORD needed = ExpandEnvironmentStringsW(value.c_str(), nullptr, 0);
+        if (needed > 0) {
+            std::vector<wchar_t> expanded(needed);
+            if (ExpandEnvironmentStringsW(value.c_str(), expanded.data(), needed)) {
+                value.assign(expanded.data());
+            }
+        }
+    }
+    return !value.empty();
+}
+
+bool QueryHkcuString(const wchar_t* subKey, const wchar_t* valueName, std::wstring& value) {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, subKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LSTATUS rc = RegQueryValueExW(hKey, valueName, nullptr, &type, nullptr, &bytes);
+    if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || bytes == 0) {
+        RegCloseKey(hKey);
+        return false;
+    }
+
+    std::vector<wchar_t> buffer(bytes / sizeof(wchar_t) + 2, L'\0');
+    rc = RegQueryValueExW(hKey, valueName, nullptr, &type,
+                          reinterpret_cast<LPBYTE>(buffer.data()), &bytes);
+    RegCloseKey(hKey);
+    if (rc != ERROR_SUCCESS) return false;
+
+    value.assign(buffer.data());
+    if (type == REG_EXPAND_SZ) {
+        DWORD needed = ExpandEnvironmentStringsW(value.c_str(), nullptr, 0);
+        if (needed > 0) {
+            std::vector<wchar_t> expanded(needed);
+            if (ExpandEnvironmentStringsW(value.c_str(), expanded.data(), needed)) {
+                value.assign(expanded.data());
+            }
+        }
+    }
+    return !value.empty();
+}
+
+void WriteHkcuString(const wchar_t* subKey, const wchar_t* valueName, const std::wstring& value) {
+    HKEY hKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, subKey, 0, nullptr, 0, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(hKey, valueName, 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(value.c_str()),
+                       static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(hKey);
+    }
+}
+
+void AddGitRootsFromHklm(std::vector<std::wstring>& roots) {
+    const wchar_t* gitKey = L"SOFTWARE\\GitForWindows";
+    const wchar_t* uninstallKey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Git_is1";
+    const REGSAM views[] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY, 0 };
+    for (REGSAM view : views) {
+        std::wstring installPath;
+        if (QueryHklmString(gitKey, L"InstallPath", view, installPath)) {
+            AddUniquePath(roots, installPath);
+        }
+        if (QueryHklmString(uninstallKey, L"InstallLocation", view, installPath)) {
+            AddUniquePath(roots, installPath);
+        }
+    }
+}
+
+bool IsPathInsideRoot(const std::wstring& root, const std::wstring& path) {
+    wchar_t rootFull[MAX_PATH] = {};
+    wchar_t pathFull[MAX_PATH] = {};
+    DWORD rootLen = GetFullPathNameW(root.c_str(), MAX_PATH, rootFull, nullptr);
+    DWORD pathLen = GetFullPathNameW(path.c_str(), MAX_PATH, pathFull, nullptr);
+    if (!rootLen || !pathLen || rootLen >= MAX_PATH || pathLen >= MAX_PATH) return false;
+
+    std::wstring rootNorm = ToLowerKey(rootFull);
+    std::wstring pathNorm = ToLowerKey(pathFull);
+    while (!rootNorm.empty() && (rootNorm.back() == L'\\' || rootNorm.back() == L'/')) {
+        rootNorm.pop_back();
+    }
+    if (pathNorm.length() < rootNorm.length()) return false;
+    if (pathNorm.compare(0, rootNorm.length(), rootNorm) != 0) return false;
+    return pathNorm.length() == rootNorm.length() ||
+           pathNorm[rootNorm.length()] == L'\\' ||
+           pathNorm[rootNorm.length()] == L'/';
+}
+
+bool IsTrustedGitBashCandidate(const std::wstring& path, const std::vector<std::wstring>& roots) {
+    if (!FeatureManager::FileExists(path)) return false;
+
+    std::wstring normalized = ToLowerKey(path);
+    const std::wstring suffix = L"\\usr\\bin\\bash.exe";
+    if (normalized.length() < suffix.length() ||
+        normalized.compare(normalized.length() - suffix.length(), suffix.length(), suffix) != 0) {
+        return false;
+    }
+
+    for (const auto& root : roots) {
+        if (IsPathInsideRoot(root, path)) return true;
+    }
+    return false;
+}
+
+std::wstring FindTrustedGitBashPath() {
+    static std::mutex cacheMutex;
+    static std::wstring cachedPath;
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        if (!cachedPath.empty() && FeatureManager::FileExists(cachedPath)) {
+            return cachedPath;
+        }
+    }
+
+    std::vector<std::wstring> roots;
+    AddKnownFolderGitRoot(roots, FOLDERID_ProgramFiles);
+    AddKnownFolderGitRoot(roots, FOLDERID_ProgramFilesX86);
+    AddGitRootsFromHklm(roots);
+
+    std::wstring cachedFromRegistry;
+    if (QueryHkcuString(L"Software\\VitraMenu", L"GitBashPath", cachedFromRegistry) &&
+        IsTrustedGitBashCandidate(cachedFromRegistry, roots)) {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        cachedPath = cachedFromRegistry;
+        return cachedPath;
+    }
+
+    for (const auto& root : roots) {
+        std::wstring candidate = root + L"\\usr\\bin\\bash.exe";
+        if (IsTrustedGitBashCandidate(candidate, roots)) {
+            std::lock_guard<std::mutex> lock(cacheMutex);
+            cachedPath = candidate;
+            WriteHkcuString(L"Software\\VitraMenu", L"GitBashPath", candidate);
+            return candidate;
+        }
+    }
+    return L"";
+}
+
+} // namespace
+
 // --- Utilities ---
 
 std::wstring FeatureManager::GetExeDir() {
@@ -153,24 +1084,9 @@ void FeatureManager::LogResult(const std::wstring& action, const std::wstring& t
 // --- Feature Implementation ---
 
 bool FeatureManager::CopyFilePath(const std::wstring& filePath) {
-    if (!OpenClipboard(NULL)) {
-        LogResult(L"CopyPath", filePath, false, L"Clipboard open failed");
-        return false;
-    }
-    EmptyClipboard();
-    size_t size = (filePath.length() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
-    if (!hMem) {
-        CloseClipboard();
-        LogResult(L"CopyPath", filePath, false, L"Alloc failed");
-        return false;
-    }
-    memcpy(GlobalLock(hMem), filePath.c_str(), size);
-    GlobalUnlock(hMem);
-    SetClipboardData(CF_UNICODETEXT, hMem);
-    CloseClipboard();
-    LogResult(L"CopyPath", filePath, true);
-    return true;
+    bool ok = CopyTextToClipboard(filePath);
+    LogResult(L"CopyPath", filePath, ok, ok ? L"" : L"Clipboard copy failed");
+    return ok;
 }
 
 bool FeatureManager::QuickRename(const std::wstring& targetPath, int mode) {
@@ -234,8 +1150,68 @@ bool FeatureManager::ExtractStructure(const std::wstring& folderPath, bool inCur
         outputFile = folderPath + L"_Structure.txt";
     }
 
-    std::wstring cmd = L"cmd /c tree \"" + folderPath + L"\" /f /a > \"" + outputFile + L"\"";
-    if (ExecuteCommand(cmd, true)) {
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+    HANDLE hOut = CreateFileW(outputFile.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool ok = false;
+    wchar_t systemDir[MAX_PATH] = {};
+    bool hasSystemDir = GetSystemDirectoryW(systemDir, MAX_PATH) != 0;
+    std::wstring treeExe = hasSystemDir ? (std::wstring(systemDir) + L"\\tree.com") : L"tree.com";
+    if (hOut != INVALID_HANDLE_VALUE) {
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = {};
+        si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+        si.wShowWindow = SW_HIDE;
+        si.hStdOutput = hOut;
+        si.hStdError = hOut;
+
+        std::wstring cmd = L"\"" + treeExe + L"\" \"" + folderPath + L"\" /f /a";
+        wchar_t* cmdCopy = _wcsdup(cmd.c_str());
+        ok = CreateProcessW(hasSystemDir ? treeExe.c_str() : nullptr, cmdCopy, nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                            nullptr, nullptr, &si, &pi) != FALSE;
+        free(cmdCopy);
+        if (ok) {
+            DWORD wait = WaitForSingleObject(pi.hProcess, 30000);
+            if (wait == WAIT_OBJECT_0) {
+                DWORD exitCode = 1;
+                ok = GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == 0;
+            } else {
+                TerminateProcess(pi.hProcess, 1);
+                ok = false;
+            }
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        CloseHandle(hOut);
+    }
+
+    if (!ok && hasSystemDir) {
+        std::wstring cmdExe = std::wstring(systemDir) + L"\\cmd.exe";
+        std::wstring cmd = L"\"" + cmdExe + L"\" /c \"\"" + treeExe + L"\" \"" + folderPath +
+                           L"\" /f /a > \"" + outputFile + L"\"\"";
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = {};
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        wchar_t* cmdCopy = _wcsdup(cmd.c_str());
+        ok = CreateProcessW(cmdExe.c_str(), cmdCopy, nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                            nullptr, nullptr, &si, &pi) != FALSE;
+        free(cmdCopy);
+        if (ok) {
+            DWORD wait = WaitForSingleObject(pi.hProcess, 30000);
+            if (wait == WAIT_OBJECT_0) {
+                DWORD exitCode = 1;
+                ok = GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == 0;
+            } else {
+                TerminateProcess(pi.hProcess, 1);
+                ok = false;
+            }
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    }
+
+    if (ok) {
         ShellExecuteW(NULL, L"open", outputFile.c_str(), NULL, NULL, SW_SHOW);
         LogResult(L"Structure", folderPath, true);
         return true;
@@ -245,33 +1221,9 @@ bool FeatureManager::ExtractStructure(const std::wstring& folderPath, bool inCur
 }
 
 bool FeatureManager::ExtractAllFilesRecursive(const std::wstring& srcDir, const std::wstring& destDir, std::vector<std::wstring>& moved) {
-    WIN32_FIND_DATAW fd;
-    std::wstring searchPath = srcDir + L"\\*";
-    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &fd);
-    if (hFind == INVALID_HANDLE_VALUE) return false;
-
-    do {
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        std::wstring fullPath = srcDir + L"\\" + fd.cFileName;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            ExtractAllFilesRecursive(fullPath, destDir, moved);
-            RemoveDirectoryW(fullPath.c_str());
-        } else {
-            std::wstring dest = destDir + L"\\" + fd.cFileName;
-            if (dest != fullPath) {
-                if (FileExists(dest)) {
-                    std::wstring name(fd.cFileName); size_t dot = name.find_last_of(L".");
-                    std::wstring base = (dot != std::wstring::npos) ? name.substr(0, dot) : name;
-                    std::wstring ext = (dot != std::wstring::npos) ? name.substr(dot) : L"";
-                    int idx = 2;
-                    do { dest = destDir + L"\\" + base + L"_(" + std::to_wstring(idx++) + L")" + ext; } while (FileExists(dest) && idx < 100);
-                }
-                if (MoveFileW(fullPath.c_str(), dest.c_str())) moved.push_back(dest);
-            }
-        }
-    } while (FindNextFileW(hFind, &fd));
-    FindClose(hFind);
-    return true;
+    std::unordered_set<std::wstring> existingFiles;
+    BuildExistingFileNameCache(destDir, existingFiles);
+    return ExtractAllFilesRecursiveCached(srcDir, destDir, moved, existingFiles);
 }
 
 bool FeatureManager::ExtractAllFiles(const std::wstring& folderPath) {
@@ -295,58 +1247,43 @@ bool FeatureManager::UnpackFolder(const std::wstring& folderPath) {
     return ok;
 }
 
-static bool IsFolderEmpty(const std::wstring& path) {
-    WIN32_FIND_DATAW fd;
-    std::wstring pattern = path + L"\\*";
-    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
-    if (hFind == INVALID_HANDLE_VALUE) return true;
-
-    bool empty = true;
-    do {
-        if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
-            empty = false;
-            break;
-        }
-    } while (FindNextFileW(hFind, &fd));
-    FindClose(hFind);
-    return empty;
-}
-
-static void FindEmptyFolders(const std::wstring& path, std::vector<std::wstring>& emptyFolders) {
-    WIN32_FIND_DATAW fd;
-    std::wstring pattern = path + L"\\*";
-    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
-    if (hFind == INVALID_HANDLE_VALUE) return;
-
-    do {
-        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            std::wstring subPath = path + L"\\" + fd.cFileName;
-            FindEmptyFolders(subPath, emptyFolders);
-            if (IsFolderEmpty(subPath)) {
-                emptyFolders.push_back(subPath);
-            }
-        }
-    } while (FindNextFileW(hFind, &fd));
-    FindClose(hFind);
-}
-
 bool FeatureManager::CleanEmptyFolders(const std::wstring& folderPath) {
     if (!DirExists(folderPath)) {
-        ModernMsgBox::Show(nullptr, L"Path is not a valid folder.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Path is not a valid folder.",
+                                 L"\u8def\u5f84\u4e0d\u662f\u6709\u6548\u6587\u4ef6\u5939\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
 
     std::vector<std::wstring> emptyFolders;
-    FindEmptyFolders(folderPath, emptyFolders);
+    bool scanOk = true;
+    FindEmptyFoldersOnePass(folderPath, emptyFolders, scanOk);
 
     if (emptyFolders.empty()) {
-        ModernMsgBox::Show(nullptr, L"No empty folders found.", L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+        if (!scanOk) {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Some folders could not be scanned. Try running VitraMenu as Administrator for protected folders.",
+                                     L"\u90e8\u5206\u6587\u4ef6\u5939\u65e0\u6cd5\u626b\u63cf\u3002\u53d7\u4fdd\u62a4\u6587\u4ef6\u5939\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
+            LogResult(L"CleanEmpty", folderPath, false, L"Scan incomplete");
+            return false;
+        }
+        ModernMsgBox::Show(nullptr,
+                           LText(L"No empty folders found.",
+                                 L"\u672a\u627e\u5230\u7a7a\u6587\u4ef6\u5939\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONINFORMATION);
         LogResult(L"CleanEmpty", folderPath, true, L"No empty folders");
         return true;
     }
 
-    std::wstring msg = L"Found " + std::to_wstring(emptyFolders.size()) + L" empty folder(s).\n\nDelete them?";
+    std::wstring msg = LText(L"Found ", L"\u627e\u5230 ") + std::to_wstring(emptyFolders.size()) +
+                       LText(L" empty folder(s).\n\nDelete them?",
+                             L" \u4e2a\u7a7a\u6587\u4ef6\u5939\u3002\n\n\u662f\u5426\u5220\u9664\uff1f");
+    if (!scanOk) {
+        msg += LText(L"\n\nSome folders could not be scanned.",
+                     L"\n\n\u90e8\u5206\u6587\u4ef6\u5939\u65e0\u6cd5\u626b\u63cf\u3002");
+    }
     int result = ModernMsgBox::Show(nullptr, msg.c_str(), L"VitraMenu", MB_YESNO | MB_ICONQUESTION);
 
     if (result != IDYES) {
@@ -359,14 +1296,26 @@ bool FeatureManager::CleanEmptyFolders(const std::wstring& folderPath) {
         if (RemoveDirectoryW(folder.c_str())) deleted++;
     }
 
-    std::wstring resultMsg = L"Deleted " + std::to_wstring(deleted) + L" of " +
-                            std::to_wstring(emptyFolders.size()) + L" empty folder(s).";
-    ModernMsgBox::Show(nullptr, resultMsg.c_str(), L"VitraMenu", MB_OK | MB_ICONINFORMATION);
-    LogResult(L"CleanEmpty", folderPath, true, L"Deleted " + std::to_wstring(deleted));
-    return true;
+    const bool allDeleted = scanOk && deleted == static_cast<int>(emptyFolders.size());
+    std::wstring resultMsg = LText(L"Deleted ", L"\u5df2\u5220\u9664 ") + std::to_wstring(deleted) +
+                             LText(L" of ", L" / ") + std::to_wstring(emptyFolders.size()) +
+                             LText(L" empty folder(s).", L" \u4e2a\u7a7a\u6587\u4ef6\u5939\u3002");
+    if (!scanOk) {
+        resultMsg += LText(L"\n\nSome folders could not be scanned.",
+                           L"\n\n\u90e8\u5206\u6587\u4ef6\u5939\u65e0\u6cd5\u626b\u63cf\u3002");
+    }
+    if (deleted != static_cast<int>(emptyFolders.size())) {
+        resultMsg += LText(L"\n\nSome folders could not be deleted.",
+                           L"\n\n\u90e8\u5206\u6587\u4ef6\u5939\u65e0\u6cd5\u5220\u9664\u3002");
+    }
+    ModernMsgBox::Show(nullptr, resultMsg.c_str(), L"VitraMenu",
+                       MB_OK | (allDeleted ? MB_ICONINFORMATION : MB_ICONWARNING));
+    LogResult(L"CleanEmpty", folderPath, allDeleted, L"Deleted " + std::to_wstring(deleted));
+    return allDeleted;
 }
 
-bool FeatureManager::UnlockFile(const std::wstring& filePath) {
+bool FeatureManager::UnlockFile(const std::wstring& filePath, std::wstring* batchMessage) {
+    if (batchMessage) batchMessage->clear();
     LogResult(L"Unlock", filePath, true, L"Starting unlock process");
 
     // Step 1: Locate handle.exe
@@ -374,124 +1323,97 @@ bool FeatureManager::UnlockFile(const std::wstring& filePath) {
     std::wstring handleExe;
     for (const wchar_t* name : { L"handle64.exe", L"handle.exe" }) {
         std::wstring candidate = exeDir + L"\\" + name;
-        if (FileExists(candidate)) { handleExe = candidate; break; }
+        if (FileExists(candidate)) {
+            handleExe = candidate;
+            break;
+        }
     }
 
-    if (handleExe.empty()) {
-        // No handle.exe - use PowerShell to find locking processes
+    std::vector<LockingProcess> rmProcesses;
+    std::vector<LockingProcess> handleProcesses;
+    std::wstring handleOutput;
+    std::atomic<DWORD> handleTimeoutMs(3000);
+
+    std::thread rmThread([&]() {
+        QueryRestartManagerLocks(filePath, rmProcesses);
+    });
+
+    std::thread handleThread;
+    if (!handleExe.empty()) {
+        handleThread = std::thread([&]() {
+            std::wstring handleCmd = L"\"" + handleExe + L"\" -accepteula -nobanner \"" + filePath + L"\"";
+            ExecuteCommandWithOutputTimeout(handleCmd, handleOutput, handleTimeoutMs);
+            if (!handleOutput.empty()) ParseHandleOutput(handleOutput, handleProcesses);
+        });
+    }
+
+    rmThread.join();
+    if (handleThread.joinable()) handleThread.join();
+
+    std::vector<LockingProcess> processes;
+    for (const auto& p : rmProcesses) AddLockingProcess(processes, p.pid, p.name, p.source);
+    for (const auto& p : handleProcesses) AddLockingProcess(processes, p.pid, p.name, p.source);
+
+    LogResult(L"Unlock", filePath, !processes.empty(),
+              L"RM=" + std::to_wstring(rmProcesses.size()) +
+              L", Handle=" + std::to_wstring(handleProcesses.size()));
+
+    if (processes.empty()) {
         std::wstring psScript =
-            L"powershell -ExecutionPolicy Bypass -Command \""
+            QuoteForCommandLine(GetPowerShellExecutable()) + L" -NoProfile -ExecutionPolicy Bypass -Command \""
             L"$ErrorActionPreference='SilentlyContinue'; "
-            L"$path='" + filePath + L"'; "
+            L"$path='" + EscapePowerShellSingleQuoted(filePath) + L"'; "
             L"$procs = Get-Process | Where-Object { $_.Path -and (Test-Path $_.Path) } | "
             L"  Where-Object { try { $_.Modules | Where-Object { $_.FileName -like ($path+'*') -or $_.FileName -eq $path } } catch {} }; "
             L"if ($procs) { $procs | ForEach-Object { Write-Output ('{0} (PID:{1})' -f $_.ProcessName, $_.Id) } } "
             L"else { Write-Output 'NO_LOCK_FOUND' }\"";
 
         std::wstring output;
-        ExecuteCommandWithOutput(psScript, output);
-        LogResult(L"Unlock", filePath, true, L"PS output: " + output);
+        std::atomic<DWORD> psTimeoutMs(10000);
+        bool psCompleted = ExecuteCommandWithOutputTimeout(psScript, output, psTimeoutMs);
+        ParsePowerShellUnlockOutput(output, processes);
+        LogResult(L"Unlock", filePath, !processes.empty(),
+                  (psCompleted ? L"PS output: " : L"PS timeout/failure output: ") + output);
 
-        if (output.find(L"NO_LOCK_FOUND") != std::wstring::npos || output.empty()) {
-            ModernMsgBox::Show(NULL,
-                (L"No locking processes found for:\n\n" + filePath +
-                 L"\n\nThe item may not be locked, or use handle64.exe for deeper scanning.\n"
-                 L"Place handle64.exe next to VitraMenu.exe for enhanced detection.").c_str(),
-                L"VitraMenu", MB_OK | MB_ICONINFORMATION);
-            LogResult(L"Unlock", filePath, false, L"No processes found");
-            return false;
-        }
-
-        // Found something via PowerShell
-        int result = ModernMsgBox::Show(NULL,
-            (L"Processes possibly locking this item:\n\n" + output +
-             L"\n\nDo you want to force-terminate them?").c_str(),
-            L"VitraMenu", MB_YESNO | MB_ICONWARNING);
-
-        if (result != IDYES) return false;
-
-        // Use taskkill to kill by name
-        std::wstring fileName = filePath.substr(filePath.find_last_of(L"\\/") + 1);
-        std::wstring killCmd = L"taskkill /F /IM \"" + fileName + L"\"";
-        bool ok = ExecuteCommand(killCmd, true);
-        ModernMsgBox::Show(NULL,
-            ok ? L"Processes terminated successfully." : L"Could not terminate processes. Try running as Administrator.",
-            L"VitraMenu", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
-        LogResult(L"Unlock", filePath, ok, L"PowerShell method");
-        return ok;
-    }
-
-    // Step 2: Use handle.exe for precise detection
-    std::wstring handleCmd = L"\"" + handleExe + L"\" -accepteula -nobanner \"" + filePath + L"\"";
-    std::wstring output;
-    bool cmdOk = ExecuteCommandWithOutput(handleCmd, output);
-    LogResult(L"Unlock", filePath, cmdOk, L"Handle output: " + output);
-
-    if (!cmdOk || output.empty()) {
-        ModernMsgBox::Show(NULL,
-            (L"handle.exe failed to scan:\n" + filePath).c_str(),
-            L"VitraMenu", MB_OK | MB_ICONERROR);
-        return false;
-    }
-
-    // Parse PIDs and process names from output
-    std::set<DWORD> pids;
-    std::wstring processInfo;
-
-    // Simple line parsing without wistringstream
-    const wchar_t* p = output.c_str();
-    while (*p) {
-        const wchar_t* lineEnd = wcschr(p, L'\n');
-        std::wstring line;
-        if (lineEnd) {
-            line.assign(p, lineEnd);
-            p = lineEnd + 1;
-        } else {
-            line = p;
-            p += wcslen(p);
-        }
-        // Remove trailing \r
-        if (!line.empty() && line.back() == L'\r') line.pop_back();
-
-        size_t pidPos = line.find(L"pid: ");
-        if (pidPos == std::wstring::npos) continue;
-
-        std::wstring procName = line.substr(0, pidPos);
-        size_t nameEnd = procName.find_last_not_of(L" \t");
-        if (nameEnd != std::wstring::npos) procName = procName.substr(0, nameEnd + 1);
-
-        size_t start = pidPos + 5;
-        size_t end = line.find_first_not_of(L"0123456789", start);
-        std::wstring pidStr = line.substr(start, end - start);
-        if (!pidStr.empty()) {
-            wchar_t* endPtr = nullptr;
-            DWORD pid = wcstoul(pidStr.c_str(), &endPtr, 10);
-            if (endPtr != pidStr.c_str()) {
-                pids.insert(pid);
-                processInfo += procName + L" (PID: " + pidStr + L")\n";
+        if (processes.empty() || output.find(L"NO_LOCK_FOUND") != std::wstring::npos) {
+            const UINT noLockIcon = psCompleted ? MB_ICONINFORMATION : MB_ICONWARNING;
+            if (handleExe.empty()) {
+                std::wstring noLockMsg = LText(L"No locking processes found for:\n\n",
+                                               L"\u672a\u627e\u5230\u5360\u7528\u8fdb\u7a0b\uff1a\n\n") +
+                                         filePath +
+                                         LText(L"\n\nThe item may not be locked, or handle64.exe is not available for deeper scanning.\n"
+                                               L"Place handle64.exe next to VitraMenu.exe for enhanced detection.",
+                                               L"\n\n\u8be5\u9879\u76ee\u53ef\u80fd\u672a\u88ab\u5360\u7528\uff0c\u6216\u8005\u7f3a\u5c11 handle64.exe \u8fdb\u884c\u6df1\u5ea6\u626b\u63cf\u3002\n"
+                                               L"\u5c06 handle64.exe \u653e\u5230 VitraMenu.exe \u540c\u76ee\u5f55\u53ef\u589e\u5f3a\u68c0\u6d4b\u3002");
+                if (!psCompleted) {
+                    noLockMsg += LText(L"\n\nPowerShell fallback did not complete within the timeout.",
+                                       L"\n\nPowerShell \u515c\u5e95\u68c0\u6d4b\u8d85\u65f6\u672a\u5b8c\u6210\u3002");
+                }
+                ModernMsgBox::Show(NULL,
+                    noLockMsg.c_str(),
+                    L"VitraMenu", MB_OK | noLockIcon);
+            } else {
+                std::wstring noLockMsg = LText(L"No processes are currently locking:\n\n",
+                                                L"\u5f53\u524d\u6ca1\u6709\u8fdb\u7a0b\u5360\u7528\uff1a\n\n") + filePath;
+                if (!psCompleted) {
+                    noLockMsg += LText(L"\n\nPowerShell fallback did not complete within the timeout.",
+                                       L"\n\nPowerShell \u515c\u5e95\u68c0\u6d4b\u8d85\u65f6\u672a\u5b8c\u6210\u3002");
+                }
+                ModernMsgBox::Show(NULL,
+                    noLockMsg.c_str(),
+                    L"VitraMenu", MB_OK | noLockIcon);
             }
+            LogResult(L"Unlock", filePath, false, L"No processes found");
+            if (batchMessage) *batchMessage = L"NO_LOCK_FOUND";
+            return true;
         }
     }
 
-    if (pids.empty()) {
-        if (output.find(L"No matching handles found") != std::wstring::npos ||
-            output.find(L"no matching") != std::wstring::npos) {
-            ModernMsgBox::Show(NULL,
-                (L"No processes are currently locking:\n\n" + filePath).c_str(),
-                L"VitraMenu", MB_OK | MB_ICONINFORMATION);
-        } else {
-            ModernMsgBox::Show(NULL,
-                (L"handle.exe scan complete but could not parse results.\n\nRaw output:\n" + output).c_str(),
-                L"VitraMenu", MB_OK | MB_ICONINFORMATION);
-        }
-        LogResult(L"Unlock", filePath, false, L"No PIDs parsed");
-        return false;
-    }
-
-    // Step 3: Ask user before killing
-    std::wstring msg = L"Found " + std::to_wstring(pids.size()) + L" process(es) locking:\n\n"
+    std::wstring processInfo = BuildProcessInfoText(processes);
+    std::wstring msg = LText(L"Found ", L"\u627e\u5230 ") + std::to_wstring(processes.size()) +
+                     LText(L" process(es) locking:\n\n", L" \u4e2a\u5360\u7528\u8fdb\u7a0b\uff1a\n\n")
                      + filePath + L"\n\n" + processInfo
-                     + L"\nTerminate these processes?";
+                     + LText(L"\nTerminate these processes?", L"\n\u662f\u5426\u7ec8\u6b62\u8fd9\u4e9b\u8fdb\u7a0b\uff1f");
 
     int result = ModernMsgBox::Show(NULL, msg.c_str(), L"VitraMenu", MB_YESNO | MB_ICONWARNING);
     if (result != IDYES) {
@@ -499,46 +1421,31 @@ bool FeatureManager::UnlockFile(const std::wstring& filePath) {
         return false;
     }
 
-    // Step 4: Kill each PID
     int killed = 0;
-    for (DWORD pid : pids) {
-        std::wstring killCmd = L"taskkill /F /PID " + std::to_wstring(pid);
-        if (ExecuteCommand(killCmd, true)) killed++;
+    for (const auto& p : processes) {
+        if (TerminateProcessByPid(p.pid)) killed++;
     }
 
-    std::wstring resultMsg = L"Terminated " + std::to_wstring(killed) + L" of "
-                           + std::to_wstring(pids.size()) + L" processes.";
-    if (killed < (int)pids.size()) {
-        resultMsg += L"\n\nSome processes could not be terminated.\nTry running VitraMenu as Administrator.";
+    std::wstring resultMsg = LText(L"Terminated ", L"\u5df2\u7ec8\u6b62 ") + std::to_wstring(killed) +
+                           LText(L" of ", L" / ")
+                           + std::to_wstring(processes.size()) +
+                           LText(L" processes.", L" \u4e2a\u8fdb\u7a0b\u3002");
+    if (killed < (int)processes.size()) {
+        resultMsg += LText(L"\n\nSome processes could not be terminated.\nTry running VitraMenu as Administrator.",
+                           L"\n\n\u90e8\u5206\u8fdb\u7a0b\u65e0\u6cd5\u7ec8\u6b62\u3002\n\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002");
     }
 
     ModernMsgBox::Show(NULL, resultMsg.c_str(), L"VitraMenu",
-                MB_OK | (killed == (int)pids.size() ? MB_ICONINFORMATION : MB_ICONWARNING));
-    LogResult(L"Unlock", filePath, killed > 0, L"Killed " + std::to_wstring(killed) + L"/" + std::to_wstring(pids.size()));
+                MB_OK | (killed == (int)processes.size() ? MB_ICONINFORMATION : MB_ICONWARNING));
+    LogResult(L"Unlock", filePath, killed > 0, L"Killed " + std::to_wstring(killed) + L"/" + std::to_wstring(processes.size()));
     return killed > 0;
 }
 
 bool FeatureManager::ConvertEncoding(const std::wstring& filePath, const std::wstring& encoding) {
-    struct { const wchar_t* key; const wchar_t* psEnc; } table[] = {
-        { L"utf-8", L"[System.Text.UTF8Encoding]::new($false)" },
-        { L"utf-8-bom", L"[System.Text.UTF8Encoding]::new($true)" },
-        { L"ansi", L"[System.Text.Encoding]::Default" },
-        { L"utf-16le", L"[System.Text.Encoding]::Unicode" },
-        { L"utf-16be", L"[System.Text.Encoding]::BigEndianUnicode" }
-    };
-    std::wstring psEnc = L"[System.Text.UTF8Encoding]::new($false)";
-    for (auto& t : table) { if (encoding == t.key) { psEnc = t.psEnc; break; } }
-    
-    std::wstring script = 
-        L"$ErrorActionPreference='Stop'; "
-        L"$f='" + filePath + L"'; "
-        L"$reader = New-Object System.IO.StreamReader($f, [System.Text.Encoding]::Default, $true); "
-        L"$content = $reader.ReadToEnd(); "
-        L"$reader.Close(); "
-        L"[System.IO.File]::WriteAllText($f, $content, " + psEnc + L")";
-
-    std::wstring cmd = L"powershell -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"" + script + L"\"";
-    bool ok = ExecuteCommand(cmd, true);
+    const std::wstring enc = ToLowerKey(encoding);
+    bool known = enc == L"utf-8" || enc == L"utf-8-bom" || enc == L"ansi" ||
+                 enc == L"utf-16le" || enc == L"utf-16be";
+    bool ok = known && ConvertEncodingNativeEquivalent(filePath, enc);
     LogResult(L"Encoding", filePath, ok, L"To: " + encoding);
     return ok;
 }
@@ -553,7 +1460,8 @@ bool FeatureManager::OpenClaudeCode(const std::wstring& folderPath) {
 
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.lpVerb = NULL; // Use NULL for normal user privileges (standard cmd)
-    sei.lpFile = L"cmd.exe";
+    std::wstring cmdExe = GetSystemExecutable(L"cmd.exe");
+    sei.lpFile = cmdExe.c_str();
     sei.lpParameters = params.c_str();
     sei.lpDirectory = workDir.c_str(); // Start in the target directory
     sei.nShow = SW_SHOWNORMAL;
@@ -573,7 +1481,8 @@ bool FeatureManager::OpenCodex(const std::wstring& folderPath) {
 
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.lpVerb = NULL; // Use NULL for normal user privileges (standard cmd)
-    sei.lpFile = L"cmd.exe";
+    std::wstring cmdExe = GetSystemExecutable(L"cmd.exe");
+    sei.lpFile = cmdExe.c_str();
     sei.lpParameters = params.c_str();
     sei.lpDirectory = workDir.c_str(); // Start in the target directory
     sei.nShow = SW_SHOWNORMAL;
@@ -586,7 +1495,7 @@ bool FeatureManager::OpenCodex(const std::wstring& folderPath) {
 }
 
 bool FeatureManager::RestartExplorer() {
-    std::wstring killCmd = L"taskkill /F /IM explorer.exe";
+    std::wstring killCmd = QuoteForCommandLine(GetSystemExecutable(L"taskkill.exe")) + L" /F /IM explorer.exe";
     bool killed = ExecuteCommand(killCmd, true);
     LogResult(L"RestartExplorer", L"Kill", killed);
 
@@ -594,8 +1503,11 @@ bool FeatureManager::RestartExplorer() {
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
-    wchar_t cmd[] = L"explorer.exe";
-    bool started = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    std::wstring explorer = GetWindowsExecutable(L"explorer.exe");
+    std::wstring explorerCmd = QuoteForCommandLine(explorer);
+    wchar_t* explorerCmdCopy = _wcsdup(explorerCmd.c_str());
+    bool started = CreateProcessW(explorer.c_str(), explorerCmdCopy, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    free(explorerCmdCopy);
     if (started) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
@@ -605,7 +1517,7 @@ bool FeatureManager::RestartExplorer() {
 }
 
 bool FeatureManager::FlushDNS() {
-    std::wstring cmd = L"ipconfig /flushdns";
+    std::wstring cmd = QuoteForCommandLine(GetSystemExecutable(L"ipconfig.exe")) + L" /flushdns";
     bool ok = ExecuteCommand(cmd, true);
     LogResult(L"FlushDNS", L"ipconfig /flushdns", ok);
     return ok;
@@ -614,7 +1526,8 @@ bool FeatureManager::FlushDNS() {
 bool FeatureManager::OpenRegistryEditor() {
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.lpVerb = L"runas";
-    sei.lpFile = L"regedit.exe";
+    std::wstring regedit = GetWindowsExecutable(L"regedit.exe");
+    sei.lpFile = regedit.c_str();
     sei.nShow = SW_SHOWNORMAL;
 
     bool ok = ShellExecuteExW(&sei) != FALSE;
@@ -627,10 +1540,11 @@ bool FeatureManager::OpenHosts() {
     std::wstring hostsFile = hostsDir + L"\\hosts";
     
     ShellExecuteW(NULL, L"explore", hostsDir.c_str(), NULL, NULL, SW_SHOWNORMAL);
-    
+
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.lpVerb = L"runas";
-    sei.lpFile = L"notepad.exe";
+    std::wstring notepad = GetSystemExecutable(L"notepad.exe");
+    sei.lpFile = notepad.c_str();
     sei.lpParameters = hostsFile.c_str();
     sei.nShow = SW_SHOWNORMAL;
     bool ok = ShellExecuteExW(&sei) != FALSE;
@@ -645,7 +1559,7 @@ bool FeatureManager::ClearIconCache() {
     // 2. Delete IconCache.db from local appdata
     // 3. Restart explorer.exe
     
-    std::wstring killCmd = L"taskkill /F /IM explorer.exe";
+    std::wstring killCmd = QuoteForCommandLine(GetSystemExecutable(L"taskkill.exe")) + L" /F /IM explorer.exe";
     ExecuteCommand(killCmd, true);
     
     Sleep(500);
@@ -655,20 +1569,23 @@ bool FeatureManager::ClearIconCache() {
         std::wstring cachePath = std::wstring(localAppData) + L"\\IconCache.db";
         
         // Remove attributes and delete
-        std::wstring attrCmd = L"attrib -h -s -r \"" + cachePath + L"\"";
+        std::wstring attrCmd = QuoteForCommandLine(GetSystemExecutable(L"attrib.exe")) + L" -h -s -r \"" + cachePath + L"\"";
         ExecuteCommand(attrCmd, true);
         DeleteFileW(cachePath.c_str());
         
         // Also clear Explorer's thumb cache folder if possible
         std::wstring thumbCache = std::wstring(localAppData) + L"\\Microsoft\\Windows\\Explorer\\iconcache*";
-        std::wstring delThumbs = L"cmd /c del /f /q \"" + thumbCache + L"\"";
+        std::wstring delThumbs = QuoteForCommandLine(GetSystemExecutable(L"cmd.exe")) + L" /d /c del /f /q \"" + thumbCache + L"\"";
         ExecuteCommand(delThumbs, true);
     }
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
-    wchar_t cmd[] = L"explorer.exe";
-    bool started = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    std::wstring explorer = GetWindowsExecutable(L"explorer.exe");
+    std::wstring explorerCmd = QuoteForCommandLine(explorer);
+    wchar_t* explorerCmdCopy = _wcsdup(explorerCmd.c_str());
+    bool started = CreateProcessW(explorer.c_str(), explorerCmdCopy, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    free(explorerCmdCopy);
     if (started) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
@@ -760,20 +1677,6 @@ std::wstring EscapeBatchPercent(const std::wstring& s) {
     return o;
 }
 
-bool WriteOemBatchFile(const wchar_t* path, const std::wstring& wide) {
-    int n = WideCharToMultiByte(CP_OEMCP, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (n <= 0) return false;
-    std::vector<char> buf(static_cast<size_t>(n));
-    if (WideCharToMultiByte(CP_OEMCP, 0, wide.c_str(), -1, buf.data(), n, nullptr, nullptr) <= 0)
-        return false;
-    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    DWORD wr = 0;
-    BOOL ok = WriteFile(h, buf.data(), static_cast<DWORD>(n - 1), &wr, nullptr);
-    CloseHandle(h);
-    return ok && wr == static_cast<DWORD>(n - 1);
-}
-
 } // namespace
 
 bool FeatureManager::IsFirewallRuleApplied(const std::wstring& exePath, bool inbound) {
@@ -782,7 +1685,8 @@ bool FeatureManager::IsFirewallRuleApplied(const std::wstring& exePath, bool inb
     if (!gn || gn >= MAX_PATH) return false;
     
     std::wstring rule = MakeFirewallRuleName(fullBuf, inbound);
-    std::wstring cmd = L"netsh advfirewall firewall show rule name=\"" + rule + L"\"";
+    std::wstring netsh = GetSystemExecutable(L"netsh.exe");
+    std::wstring cmd = QuoteForCommandLine(netsh) + L" advfirewall firewall show rule name=\"" + rule + L"\"";
     
     // Check exit code - 0 means found, 1 means not found
     STARTUPINFOW si = { sizeof(si) };
@@ -791,16 +1695,21 @@ bool FeatureManager::IsFirewallRuleApplied(const std::wstring& exePath, bool inb
     si.wShowWindow = SW_HIDE;
 
     wchar_t* cmdCopy = _wcsdup(cmd.c_str());
-    bool ok = CreateProcessW(NULL, cmdCopy, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    bool ok = CreateProcessW(netsh.c_str(), cmdCopy, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     free(cmdCopy);
 
     if (ok) {
-        WaitForSingleObject(pi.hProcess, 10000); // Increased checkout timeout
+        DWORD wait = WaitForSingleObject(pi.hProcess, 10000);
         DWORD exitCode = 1;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
+        if (wait == WAIT_OBJECT_0) {
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+        } else {
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 500);
+        }
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        return exitCode == 0;
+        return wait == WAIT_OBJECT_0 && exitCode == 0;
     }
     return false;
 }
@@ -840,22 +1749,30 @@ void FeatureManager::EnsureSelfFirewallBlocked() {
 
 bool FeatureManager::OpenDiskCleanup(const std::wstring& drivePath) {
     if (drivePath.size() < 2) {
-        ModernMsgBox::Show(nullptr, L"Invalid drive path.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Invalid drive path.", L"\u9a71\u52a8\u5668\u8def\u5f84\u65e0\u6548\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     wchar_t letter = drivePath[0];
     if (letter >= L'a' && letter <= L'z') letter = static_cast<wchar_t>(letter - (L'a' - L'A'));
     if (letter < L'A' || letter > L'Z' || drivePath[1] != L':') {
-        ModernMsgBox::Show(nullptr, L"Invalid drive path.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Invalid drive path.", L"\u9a71\u52a8\u5668\u8def\u5f84\u65e0\u6548\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     std::wstring args = L"/d ";
     args += letter;
     args += L":";
-    HINSTANCE hi = ShellExecuteW(nullptr, L"open", L"cleanmgr.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+    std::wstring cleanmgr = GetSystemExecutable(L"cleanmgr.exe");
+    HINSTANCE hi = ShellExecuteW(nullptr, L"open", cleanmgr.c_str(), args.c_str(), nullptr, SW_SHOWNORMAL);
     const bool ok = reinterpret_cast<INT_PTR>(hi) > 32;
     if (!ok)
-        ModernMsgBox::Show(nullptr, L"Could not start Disk Cleanup (cleanmgr.exe).", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Could not start Disk Cleanup (cleanmgr.exe).",
+                                 L"\u65e0\u6cd5\u542f\u52a8\u78c1\u76d8\u6e05\u7406\uff08cleanmgr.exe\uff09\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
     LogResult(L"DiskCleanup", args, ok);
     return ok;
 }
@@ -863,108 +1780,95 @@ bool FeatureManager::OpenDiskCleanup(const std::wstring& drivePath) {
 bool FeatureManager::ApplyExeFirewallRule(const std::wstring& exePath, bool inbound, bool allow, bool silent) {
     DWORD attr = GetFileAttributesW(exePath.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        if (!silent)
-            ModernMsgBox::Show(nullptr, L"The path is invalid or is not a file.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!silent) {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"The path is invalid or is not a file.",
+                                     L"\u8def\u5f84\u65e0\u6548\u6216\u4e0d\u662f\u6587\u4ef6\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
+        }
         return false;
     }
+
     const size_t len = exePath.size();
     if (len < 4 || _wcsicmp(exePath.c_str() + len - 4, L".exe") != 0) {
-        if (!silent)
-            ModernMsgBox::Show(nullptr, L"Only .exe files are supported.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!silent) {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Only .exe files are supported.",
+                                     L"\u4ec5\u652f\u6301 .exe \u6587\u4ef6\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
+        }
         return false;
     }
+
     wchar_t fullBuf[MAX_PATH];
     const DWORD gn = GetFullPathNameW(exePath.c_str(), MAX_PATH, fullBuf, nullptr);
     if (!gn || gn >= MAX_PATH) {
-        if (!silent)
-            ModernMsgBox::Show(nullptr, L"Could not resolve the full path to the program.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!silent) {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Could not resolve the full path to the program.",
+                                     L"\u65e0\u6cd5\u89e3\u6790\u7a0b\u5e8f\u7684\u5b8c\u6574\u8def\u5f84\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
+        }
         return false;
     }
-    std::wstring full(fullBuf);
 
+    std::wstring full(fullBuf);
     const std::wstring rule = MakeFirewallRuleName(full, inbound);
     const wchar_t* dir = inbound ? L"in" : L"out";
     const wchar_t* act = allow ? L"allow" : L"block";
 
+    const std::wstring netsh = QuoteForCommandLine(GetSystemExecutable(L"netsh.exe"));
     const std::wstring progQuoted = EscapeBatchPercent(full);
+    const std::wstring command =
+        netsh + L" advfirewall firewall delete rule name=\"" + rule + L"\" >nul 2>&1 & " +
+        netsh + L" advfirewall firewall add rule name=\"" + rule + L"\" dir=" + dir +
+        L" action=" + act + L" program=\"" + progQuoted + L"\" enable=yes";
 
-    // Create temp .bat file (GetTempFileNameW creates .tmp which Notepad opens instead of executing)
-    wchar_t tmpDir[MAX_PATH], tmpPath[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, tmpDir) || !GetTempFileNameW(tmpDir, L"VF", 0, tmpPath)) {
-        if (!silent)
-            ModernMsgBox::Show(nullptr, L"Could not create a temporary script.", L"VitraMenu", MB_OK | MB_ICONWARNING);
-        return false;
-    }
-    // Rename .tmp to .bat so cmd.exe treats it as a batch file
-    std::wstring batPath = std::wstring(tmpPath);
-    DeleteFileW(tmpPath); // Delete the .tmp placeholder
-    size_t dotPos = batPath.rfind(L'.');
-    if (dotPos != std::wstring::npos)
-        batPath = batPath.substr(0, dotPos);
-    batPath += L".bat";
-
-    // Marker file: batch writes this on success; we check for its existence
-    std::wstring markerPath = batPath + L".ok";
-    std::wstring markerQuoted = EscapeBatchPercent(markerPath);
-
-    // Build batch script
-    const std::wstring content =
-        L"@echo off\r\n"
-        L"netsh advfirewall firewall delete rule name=\"" + rule + L"\" >nul 2>&1\r\n"
-        L"netsh advfirewall firewall add rule name=\"" + rule + L"\" dir=" + dir + L" action=" + act +
-        L" program=\"" + progQuoted + L"\" enable=yes >nul 2>&1\r\n"
-        L"if %errorlevel% equ 0 (\r\n"
-        L"  echo OK>\"" + markerQuoted + L"\"\r\n"
-        L")\r\n"
-        L"del \"%~f0\"\r\n";
-
-    if (!WriteOemBatchFile(batPath.c_str(), content)) {
-        DeleteFileW(batPath.c_str());
-        if (!silent)
-            ModernMsgBox::Show(nullptr, L"Could not write the temporary script.", L"VitraMenu", MB_OK | MB_ICONWARNING);
-        return false;
-    }
-
-    std::wstring params = L"/c \"" + batPath + L"\"";
+    std::wstring cmdExe = GetSystemExecutable(L"cmd.exe");
+    std::wstring params = L"/d /c \"" + command + L"\"";
 
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.lpVerb = L"runas";
-    sei.lpFile = L"cmd.exe";
+    sei.lpFile = cmdExe.c_str();
     sei.lpParameters = params.c_str();
     sei.nShow = SW_HIDE;
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
 
-    const bool ok = ShellExecuteExW(&sei) != FALSE;
-    if (!ok) {
-        DeleteFileW(batPath.c_str());
+    const bool launched = ShellExecuteExW(&sei) != FALSE;
+    bool success = false;
+    if (!launched) {
         if (!silent) {
             ModernMsgBox::Show(nullptr,
-                              L"Administrator rights are required to change the firewall. "
-                              L"The operation was cancelled or failed to start.",
-                              L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+                               LText(L"Administrator rights are required to change the firewall. The operation was cancelled or failed to start.",
+                                     L"\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u624d\u80fd\u66f4\u6539\u9632\u706b\u5899\u3002\u64cd\u4f5c\u5df2\u53d6\u6d88\u6216\u542f\u52a8\u5931\u8d25\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONINFORMATION);
         }
-    } else {
-        if (sei.hProcess) {
-            WaitForSingleObject(sei.hProcess, 30000);
-            CloseHandle(sei.hProcess);
+    } else if (sei.hProcess) {
+        DWORD wait = WaitForSingleObject(sei.hProcess, 30000);
+        DWORD exitCode = 1;
+        if (wait == WAIT_OBJECT_0) {
+            success = GetExitCodeProcess(sei.hProcess, &exitCode) && exitCode == 0;
+        } else {
+            TerminateProcess(sei.hProcess, 1);
+            WaitForSingleObject(sei.hProcess, 500);
         }
-
-        // Check if the batch wrote the success marker
-        bool success = (GetFileAttributesW(markerPath.c_str()) != INVALID_FILE_ATTRIBUTES);
-        DeleteFileW(markerPath.c_str()); // Clean up marker
-
-        if (!silent) {
-            std::wstring exeName = full.substr(full.find_last_of(L"\\/") + 1);
-            std::wstring resMsg = exeName + L"\n\nFirewall " +
-                                 std::wstring(inbound ? L"Inbound" : L"Outbound") +
-                                 L" [" + std::wstring(allow ? L"Allow" : L"Block") + L"]: " +
-                                 (success ? L"Successfully Applied ✓" : L"Failed ✗");
-            ModernMsgBox::Show(nullptr, resMsg.c_str(), L"VitraMenu",
-                               success ? MB_OK | MB_ICONINFORMATION : MB_OK | MB_ICONERROR);
-        }
+        CloseHandle(sei.hProcess);
     }
-    LogResult(L"FirewallRule", full + L" " + dir + L" " + act, ok);
-    return ok;
+
+    if (!silent) {
+        std::wstring exeName = full.substr(full.find_last_of(L"\\/") + 1);
+        std::wstring resMsg = exeName + L"\n\n" +
+                              LText(L"Firewall ", L"\u9632\u706b\u5899 ") +
+                              (inbound ? LText(L"Inbound", L"\u5165\u7ad9") : LText(L"Outbound", L"\u51fa\u7ad9")) +
+                              L" [" + (allow ? LText(L"Allow", L"\u5141\u8bb8") : LText(L"Block", L"\u963b\u6b62")) + L"]: " +
+                              (success ? LText(L"Applied successfully.", L"\u5df2\u6210\u529f\u5e94\u7528\u3002")
+                                       : LText(L"Failed.", L"\u5931\u8d25\u3002"));
+        ModernMsgBox::Show(nullptr, resMsg.c_str(), L"VitraMenu",
+                           success ? MB_OK | MB_ICONINFORMATION : MB_OK | MB_ICONERROR);
+    }
+
+    LogResult(L"FirewallRule", full + L" " + dir + L" " + act, success);
+    return success;
 }
 
 static std::wstring BytesToHexLower(const BYTE* data, DWORD count) {
@@ -1030,7 +1934,7 @@ static bool HashFileBcrypt(const std::wstring& filePath, LPCWSTR algId, std::vec
         if (!BCRYPT_SUCCESS(BCryptHashData(hHash, nullptr, 0, 0)))
             dataOk = false;
     } else {
-        std::vector<BYTE> buf(1024 * 1024);
+        std::vector<BYTE> buf(4 * 1024 * 1024);
         while (dataOk) {
             DWORD read = 0;
             if (!ReadFile(hFile, buf.data(), static_cast<DWORD>(buf.size()), &read, nullptr)) {
@@ -1062,13 +1966,17 @@ static bool HashFileBcrypt(const std::wstring& filePath, LPCWSTR algId, std::vec
     return true;
 }
 
-bool FeatureManager::CopyFileHash(const std::wstring& filePath, const std::wstring& algorithm) {
+bool FeatureManager::CopyFileHash(const std::wstring& filePath, const std::wstring& algorithm,
+                                  std::wstring* resultMessage) {
+    if (resultMessage) resultMessage->clear();
     auto notify = [](const wchar_t* body, const wchar_t* title, UINT icon) {
         ModernMsgBox::Show(nullptr, body, title, MB_OK | icon | MB_TOPMOST);
     };
 
     if (!FileExists(filePath)) {
-        notify(L"The path is not an existing file.", L"VitraMenu", MB_ICONWARNING);
+        notify(LText(L"The path is not an existing file.",
+                     L"\u8def\u5f84\u4e0d\u662f\u5df2\u5b58\u5728\u7684\u6587\u4ef6\u3002").c_str(),
+               L"VitraMenu", MB_ICONWARNING);
         return false;
     }
 
@@ -1085,64 +1993,56 @@ bool FeatureManager::CopyFileHash(const std::wstring& filePath, const std::wstri
     else if (algLower == L"sha256")
         algId = BCRYPT_SHA256_ALGORITHM;
     else {
-        notify(L"Unknown algorithm.\nUse md5, sha1, or sha256.", L"VitraMenu", MB_ICONWARNING);
+        notify(LText(L"Unknown algorithm.\nUse md5, sha1, or sha256.",
+                     L"\u672a\u77e5\u7b97\u6cd5\u3002\n\u8bf7\u4f7f\u7528 md5\u3001sha1 \u6216 sha256\u3002").c_str(),
+               L"VitraMenu", MB_ICONWARNING);
         return false;
     }
 
     std::vector<BYTE> raw;
     if (!HashFileBcrypt(filePath, algId, raw)) {
-        notify(L"Could not compute hash for this file.\nIt may be locked or inaccessible.", L"VitraMenu",
+        notify(LText(L"Could not compute hash for this file.\nIt may be locked or inaccessible.",
+                     L"\u65e0\u6cd5\u8ba1\u7b97\u6b64\u6587\u4ef6\u7684\u54c8\u5e0c\u3002\n\u6587\u4ef6\u53ef\u80fd\u88ab\u5360\u7528\u6216\u65e0\u6cd5\u8bbf\u95ee\u3002").c_str(),
+               L"VitraMenu",
                MB_ICONWARNING);
         return false;
     }
 
     const std::wstring hex = BytesToHexLower(raw.data(), static_cast<DWORD>(raw.size()));
 
-    bool onClipboard = false;
-    const size_t byteSize = (hex.length() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, byteSize);
-    void* locked = hMem ? GlobalLock(hMem) : nullptr;
-    if (hMem && locked) {
-        memcpy(locked, hex.c_str(), byteSize);
-        GlobalUnlock(hMem);
-        if (OpenClipboard(nullptr)) {
-            EmptyClipboard();
-            if (SetClipboardData(CF_UNICODETEXT, hMem)) {
-                onClipboard = true;
-                hMem = nullptr;
-            }
-            if (hMem)
-                GlobalFree(hMem);
-            CloseClipboard();
-        } else {
-            GlobalFree(hMem);
-        }
-    } else if (hMem) {
-        GlobalFree(hMem);
-    }
+    bool onClipboard = CopyTextToClipboard(hex);
 
     std::wstring msg = algLower + L":\n" + hex;
-    if (onClipboard)
-        msg += L"\nCopied to clipboard. Paste with Ctrl+V.";
-    else
-        msg += L"\nCould not place text on clipboard. Copy manually.";
+    if (!onClipboard) {
+        msg += LText(L"\n\nClipboard copy failed.",
+                     L"\n\n\u590d\u5236\u5230\u526a\u8d34\u677f\u5931\u8d25\u3002");
+    }
 
-    notify(msg.c_str(), L"VitraMenu - File hash", MB_ICONINFORMATION);
+    if (resultMessage) *resultMessage = msg;
+
+    notify(msg.c_str(),
+           LText(L"VitraMenu - File hash", L"VitraMenu - \u6587\u4ef6\u54c8\u5e0c").c_str(),
+           onClipboard ? MB_ICONINFORMATION : MB_ICONWARNING);
     LogResult(L"FileHash", filePath + L" " + algLower, onClipboard);
-    return true;
+    return onClipboard;
 }
 
 bool FeatureManager::TakeOwnership(const std::wstring& path) {
     DWORD attr = GetFileAttributesW(path.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES) {
-        ModernMsgBox::Show(nullptr, L"The path was not found.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"The path was not found.", L"\u8def\u5f84\u672a\u627e\u5230\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     const bool isDir = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
     wchar_t fullBuf[MAX_PATH];
     const DWORD gn = GetFullPathNameW(path.c_str(), MAX_PATH, fullBuf, nullptr);
     if (!gn || gn >= MAX_PATH) {
-        ModernMsgBox::Show(nullptr, L"Could not resolve the full path.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Could not resolve the full path.",
+                                 L"\u65e0\u6cd5\u89e3\u6790\u5b8c\u6574\u8def\u5f84\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     std::wstring full(fullBuf);
@@ -1153,86 +2053,80 @@ bool FeatureManager::TakeOwnership(const std::wstring& path) {
         p = shortBuf;
 
     const std::wstring q = EscapeBatchPercent(p);
-    std::wstring content;
-    if (isDir) {
-        content = L"@echo off\r\ntakeown /f \"" + q + L"\" /r /d y\r\n"
-                  L"icacls \"" + q + L"\" /grant %USERNAME%:F /t /c\r\n"
-                  L"del \"%~f0\"\r\n";
-    } else {
-        content = L"@echo off\r\ntakeown /f \"" + q + L"\"\r\n"
-                  L"icacls \"" + q + L"\" /grant %USERNAME%:F /c\r\n"
-                  L"del \"%~f0\"\r\n";
-    }
+    std::wstring command = isDir
+        ? (L"takeown /f \"" + q + L"\" /r /d y && icacls \"" + q + L"\" /grant \"%USERNAME%:F\" /t /c")
+        : (L"takeown /f \"" + q + L"\" && icacls \"" + q + L"\" /grant \"%USERNAME%:F\" /c");
 
-    wchar_t tmpDir[MAX_PATH], batPath[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, tmpDir) || !GetTempFileNameW(tmpDir, L"VO", 0, batPath)) {
-        ModernMsgBox::Show(nullptr, L"Could not create a temporary script.", L"VitraMenu", MB_OK | MB_ICONWARNING);
-        return false;
-    }
-    if (!WriteOemBatchFile(batPath, content)) {
-        DeleteFileW(batPath);
-        ModernMsgBox::Show(nullptr, L"Could not write the temporary script.", L"VitraMenu", MB_OK | MB_ICONWARNING);
-        return false;
-    }
-
-    std::wstring params = L"/c \"";
-    params += batPath;
-    params += L"\"";
+    std::wstring params = L"/d /c \"" + command + L"\"";
+    std::wstring cmdExe = GetSystemExecutable(L"cmd.exe");
 
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.lpVerb = L"runas";
-    sei.lpFile = L"cmd.exe";
+    sei.lpFile = cmdExe.c_str();
     sei.lpParameters = params.c_str();
     sei.nShow = SW_HIDE;
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
 
     const bool ok = ShellExecuteExW(&sei) != FALSE;
-    if (sei.hProcess)
+    bool success = false;
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        DWORD exitCode = 1;
+        success = GetExitCodeProcess(sei.hProcess, &exitCode) && exitCode == 0;
         CloseHandle(sei.hProcess);
+    }
     if (!ok) {
-        DeleteFileW(batPath);
         ModernMsgBox::Show(nullptr,
-                          L"Administrator rights are usually required. The operation was cancelled or failed to start.",
-                          L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+                           LText(L"Administrator rights are usually required. The operation was cancelled or failed to start.",
+                                 L"\u901a\u5e38\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002\u64cd\u4f5c\u5df2\u53d6\u6d88\u6216\u542f\u52a8\u5931\u8d25\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+    } else if (!success) {
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Could not take ownership or grant permissions. Try running VitraMenu as Administrator.",
+                                 L"\u65e0\u6cd5\u83b7\u53d6\u6240\u6709\u6743\u6216\u6388\u4e88\u6743\u9650\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
     } else {
         ModernMsgBox::Show(nullptr,
-                          L"Approve UAC to run takeown and icacls. The script removes itself when finished.",
-                          L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+                           LText(L"Ownership and permissions updated successfully.",
+                                 L"\u6240\u6709\u6743\u548c\u6743\u9650\u5df2\u66f4\u65b0\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONINFORMATION);
     }
-    LogResult(L"TakeOwnership", full, ok);
-    return ok;
+    LogResult(L"TakeOwnership", full, success);
+    return success;
 }
 
 bool FeatureManager::ClearReadOnlyAttribute(const std::wstring& path) {
     DWORD attr = GetFileAttributesW(path.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES) {
-        ModernMsgBox::Show(nullptr, L"The path was not found.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"The path was not found.", L"\u8def\u5f84\u672a\u627e\u5230\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     const bool isDir = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
     wchar_t fullBuf[MAX_PATH];
     const DWORD gn = GetFullPathNameW(path.c_str(), MAX_PATH, fullBuf, nullptr);
     if (!gn || gn >= MAX_PATH) {
-        ModernMsgBox::Show(nullptr, L"Could not resolve the full path.", L"VitraMenu", MB_OK | MB_ICONWARNING);
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Could not resolve the full path.",
+                                 L"\u65e0\u6cd5\u89e3\u6790\u5b8c\u6574\u8def\u5f84\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
-    std::wstring use(fullBuf);
-    wchar_t shortBuf[MAX_PATH];
-    const DWORD sns = GetShortPathNameW(fullBuf, shortBuf, MAX_PATH);
-    if (sns && sns < MAX_PATH)
-        use = shortBuf;
-    std::wstring cmd = L"cmd.exe /c attrib -r \"";
-    cmd += use;
-    cmd += L"\"";
-    if (isDir)
-        cmd += L" /s /d";
-
-    const bool ok = ExecuteCommand(cmd, true);
+    (void)isDir;
+    ClearReadOnlyStats stats;
+    const bool ok = ClearReadOnlyRecursiveNative(fullBuf, stats);
     ModernMsgBox::Show(nullptr,
-                       ok ? L"Read-only attributes were cleared (where permitted)."
-                          : L"attrib could not be run. Try running VitraMenu as Administrator for protected items.",
+                       ok ? LText(L"Read-only attributes were cleared (where permitted).",
+                                  L"\u53ea\u8bfb\u5c5e\u6027\u5df2\u6e05\u9664\uff08\u6743\u9650\u5141\u8bb8\u7684\u9879\u76ee\uff09\u3002").c_str()
+                          : LText(L"Some read-only attributes could not be cleared. Try running VitraMenu as Administrator for protected items.",
+                                  L"\u90e8\u5206\u53ea\u8bfb\u5c5e\u6027\u65e0\u6cd5\u6e05\u9664\u3002\u53d7\u4fdd\u62a4\u9879\u76ee\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002").c_str(),
                        L"VitraMenu", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
-    LogResult(L"ClearReadOnly", path, ok);
+    LogResult(L"ClearReadOnly", path, ok,
+              L"Visited=" + std::to_wstring(stats.visited) +
+              L", Changed=" + std::to_wstring(stats.changed) +
+              L", Failed=" + std::to_wstring(stats.failed) +
+              L", LastError=" + std::to_wstring(stats.lastError));
     return ok;
 }
 
@@ -1251,39 +2145,17 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
     bool isDir = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
     if (isDir) {
-        WIN32_FIND_DATAW fd;
-        std::wstring pattern = normalizedPath + L"\\*";
-        HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
-        bool isEmpty = true;
-        if (hFind != INVALID_HANDLE_VALUE) {
-            do {
-                if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
-                    isEmpty = false;
-                    break;
-                }
-            } while (FindNextFileW(hFind, &fd));
-            FindClose(hFind);
-        }
-
-        if (!isEmpty) {
-            int result = ModernMsgBox::Show(nullptr, T(Msg::DirNotEmpty), T(Msg::SuperDeleteTitle), MB_YESNO | MB_ICONWARNING);
-            if (result != IDYES) {
-                LogResult(L"SuperDelete", targetPath, false, L"User cancelled");
-                return false;
-            }
+        std::wstring prompt = LText(
+            L"Delete this directory and all contents?\n\nThis operation cannot be undone.",
+            L"\u662f\u5426\u5220\u9664\u6b64\u76ee\u5f55\u53ca\u5176\u6240\u6709\u5185\u5bb9\uff1f\n\n\u6b64\u64cd\u4f5c\u65e0\u6cd5\u64a4\u9500\u3002");
+        int result = ModernMsgBox::Show(nullptr, prompt.c_str(), T(Msg::SuperDeleteTitle), MB_YESNO | MB_ICONWARNING);
+        if (result != IDYES) {
+            LogResult(L"SuperDelete", targetPath, false, L"User cancelled");
+            return false;
         }
     }
-    // Find Git Bash
-    std::wstring bashPath;
-    const wchar_t* paths[] = {
-        L"E:\\Git\\usr\\bin\\bash.exe",
-        L"D:\\Git\\usr\\bin\\bash.exe",
-        L"C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-        L"C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe"
-    };
-    for (auto p : paths) {
-        if (FileExists(p)) { bashPath = p; break; }
-    }
+    // Find Git Bash from trusted Git for Windows install locations only.
+    std::wstring bashPath = FindTrustedGitBashPath();
 
     if (bashPath.empty()) {
         ModernMsgBox::Show(nullptr, T(Msg::GitBashNotFound), T(Msg::Title), MB_OK | MB_ICONWARNING);
@@ -1298,8 +2170,10 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
         unixPath = L"/" + std::wstring(1, drive) + unixPath.substr(2);
     }
 
-    // Direct call to Git Bash (no elevation, just like command line)
-    std::wstring cmd = L"\"" + bashPath + L"\" -c \"/usr/bin/rm -" + (isDir ? L"rf" : L"f") + L" '" + unixPath + L"'\"";
+    // Direct call to Git Bash, then exec rm so bash does not stay as an extra process.
+    std::wstring rmScript = L"exec /usr/bin/rm -" + std::wstring(isDir ? L"rf " : L"f ") +
+                            L"-- " + ShellSingleQuoteForBash(unixPath);
+    std::wstring cmd = L"\"" + bashPath + L"\" --noprofile --norc -c \"" + rmScript + L"\"";
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
@@ -1307,18 +2181,19 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
     si.wShowWindow = SW_HIDE;
 
     wchar_t* cmdCopy = _wcsdup(cmd.c_str());
-    bool ok = CreateProcessW(NULL, cmdCopy, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    bool ok = CreateProcessW(bashPath.c_str(), cmdCopy, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     free(cmdCopy);
 
+    DWORD exitCode = 1;
     if (ok) {
-        WaitForSingleObject(pi.hProcess, 30000);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        GetExitCodeProcess(pi.hProcess, &exitCode);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
     }
 
-    Sleep(300);
     attr = GetFileAttributesW(normalizedPath.c_str());
-    bool deleted = (attr == INVALID_FILE_ATTRIBUTES);
+    bool deleted = ok && exitCode == 0 && (attr == INVALID_FILE_ATTRIBUTES);
 
     if (deleted) {
         ModernMsgBox::Show(nullptr, T(Msg::DeleteSuccess), T(Msg::Title), MB_OK | MB_ICONINFORMATION);

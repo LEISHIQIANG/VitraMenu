@@ -19,20 +19,23 @@ public:
                                        const std::wstring& icon = L"",
                                        const std::wstring& menuPosition = L"",
                                        const std::wstring& appliesTo = L"",
-                                       const std::wstring& displayName = L"");
+                                       const std::wstring& displayName = L"",
+                                       const std::wstring& multiSelectModel = L"");
 
     static bool InstallSubMenuItem(const std::wstring& parentName,
                                    const std::wstring& subName,
                                    const std::wstring& command,
                                    Scope scope,
                                    const std::wstring& icon = L"",
-                                   const std::wstring& displayName = L"");
+                                   const std::wstring& displayName = L"",
+                                   const std::wstring& multiSelectModel = L"");
 
     static bool CreateParentMenu(const std::wstring& parentName,
                                  Scope scope,
                                  const std::wstring& icon = L"",
                                  const std::wstring& appliesTo = L"",
-                                 const std::wstring& displayName = L"");
+                                 const std::wstring& displayName = L"",
+                                 const std::wstring& multiSelectModel = L"");
 
     static bool UninstallContextMenuItem(const std::wstring& itemName,
                                          Scope scope = Files);
