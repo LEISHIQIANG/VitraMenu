@@ -40,20 +40,21 @@ bool RegistryManager::WriteStringValue(HKEY hKey, const wchar_t* name, const std
  * HKCR\{base}\{itemName}\command      -> (default) = command
  */
 bool RegistryManager::InstallContextMenuItem(const std::wstring& itemName,
-                                               const std::wstring& command,
-                                               Scope scope,
-                                               const std::wstring& icon,
-                                               const std::wstring& menuPosition,
-                                               const std::wstring& appliesTo,
-                                               const std::wstring& displayName) {
+                                                const std::wstring& command,
+                                                Scope scope,
+                                                const std::wstring& icon,
+                                                const std::wstring& menuPosition,
+                                                const std::wstring& appliesTo,
+                                                const std::wstring& displayName,
+                                                const std::wstring& multiSelectModel) {
     if (scope == BothFileFolder) {
-        bool okS = InstallContextMenuItem(itemName, command, Files, icon, menuPosition, appliesTo, displayName);
-        bool okD = InstallContextMenuItem(itemName, command, Directory, icon, menuPosition, appliesTo, displayName);
+        bool okS = InstallContextMenuItem(itemName, command, Files, icon, menuPosition, appliesTo, displayName, multiSelectModel);
+        bool okD = InstallContextMenuItem(itemName, command, Directory, icon, menuPosition, appliesTo, displayName, multiSelectModel);
         return okS || okD;
     }
     if (scope == DirAndBackground) {
-        bool okD = InstallContextMenuItem(itemName, command, Directory, icon, menuPosition, appliesTo, displayName);
-        bool okB = InstallContextMenuItem(itemName, command, Background, icon, menuPosition, appliesTo, displayName);
+        bool okD = InstallContextMenuItem(itemName, command, Directory, icon, menuPosition, appliesTo, displayName, multiSelectModel);
+        bool okB = InstallContextMenuItem(itemName, command, Background, icon, menuPosition, appliesTo, displayName, multiSelectModel);
         return okD || okB;
     }
     std::wstring basePath    = GetBaseRegistryPath(scope);
@@ -84,6 +85,11 @@ bool RegistryManager::InstallContextMenuItem(const std::wstring& itemName,
     } else {
         RegDeleteValueW(hKey, L"AppliesTo");
     }
+    if (!multiSelectModel.empty()) {
+        WriteStringValue(hKey, L"MultiSelectModel", multiSelectModel);
+    } else {
+        RegDeleteValueW(hKey, L"MultiSelectModel");
+    }
     if (!icon.empty())
         WriteStringValue(hKey, L"Icon", icon);
     RegCloseKey(hKey);
@@ -104,13 +110,14 @@ bool RegistryManager::InstallContextMenuItem(const std::wstring& itemName,
  * Creates only a parent container menu (has SubCommands but no command itself)
  */
 bool RegistryManager::CreateParentMenu(const std::wstring& parentName,
-                                         Scope scope,
-                                         const std::wstring& icon,
-                                         const std::wstring& appliesTo,
-                                         const std::wstring& displayName) {
+                                          Scope scope,
+                                          const std::wstring& icon,
+                                          const std::wstring& appliesTo,
+                                          const std::wstring& displayName,
+                                          const std::wstring& multiSelectModel) {
     if (scope == BothFileFolder) {
-        CreateParentMenu(parentName, Files, icon, appliesTo, displayName);
-        return CreateParentMenu(parentName, Directory, icon, appliesTo, displayName);
+        CreateParentMenu(parentName, Files, icon, appliesTo, displayName, multiSelectModel);
+        return CreateParentMenu(parentName, Directory, icon, appliesTo, displayName, multiSelectModel);
     }
     std::wstring basePath   = GetBaseRegistryPath(scope);
     std::wstring parentPath = basePath + L"\\" + parentName;
@@ -135,6 +142,11 @@ bool RegistryManager::CreateParentMenu(const std::wstring& parentName,
     } else {
         RegDeleteValueW(hKey, L"AppliesTo");
     }
+    if (!multiSelectModel.empty()) {
+        WriteStringValue(hKey, L"MultiSelectModel", multiSelectModel);
+    } else {
+        RegDeleteValueW(hKey, L"MultiSelectModel");
+    }
     if (!icon.empty())
         WriteStringValue(hKey, L"Icon", icon);
     RegCloseKey(hKey);
@@ -155,18 +167,19 @@ bool RegistryManager::CreateParentMenu(const std::wstring& parentName,
  * Automatically creates the parent if it doesn't exist
  */
 bool RegistryManager::InstallSubMenuItem(const std::wstring& parentName,
-                                           const std::wstring& subName,
-                                           const std::wstring& command,
-                                           Scope scope,
-                                           const std::wstring& icon,
-                                           const std::wstring& displayName) {
+                                            const std::wstring& subName,
+                                            const std::wstring& command,
+                                            Scope scope,
+                                            const std::wstring& icon,
+                                            const std::wstring& displayName,
+                                            const std::wstring& multiSelectModel) {
     if (scope == BothFileFolder) {
-        InstallSubMenuItem(parentName, subName, command, Files, icon, displayName);
-        return InstallSubMenuItem(parentName, subName, command, Directory, icon, displayName);
+        InstallSubMenuItem(parentName, subName, command, Files, icon, displayName, multiSelectModel);
+        return InstallSubMenuItem(parentName, subName, command, Directory, icon, displayName, multiSelectModel);
     }
     if (scope == DirAndBackground) {
-        InstallSubMenuItem(parentName, subName, command, Directory, icon, displayName);
-        return InstallSubMenuItem(parentName, subName, command, Background, icon, displayName);
+        InstallSubMenuItem(parentName, subName, command, Directory, icon, displayName, multiSelectModel);
+        return InstallSubMenuItem(parentName, subName, command, Background, icon, displayName, multiSelectModel);
     }
     std::wstring basePath    = GetBaseRegistryPath(scope);
     std::wstring parentPath  = basePath + L"\\" + parentName;
@@ -206,6 +219,11 @@ bool RegistryManager::InstallSubMenuItem(const std::wstring& parentName,
     const std::wstring& display = displayName.empty() ? subName : displayName;
     WriteStringValue(hKey, NULL,       display);
     WriteStringValue(hKey, L"MUIVerb", display);
+    if (!multiSelectModel.empty()) {
+        WriteStringValue(hKey, L"MultiSelectModel", multiSelectModel);
+    } else {
+        RegDeleteValueW(hKey, L"MultiSelectModel");
+    }
     if (!icon.empty())
         WriteStringValue(hKey, L"Icon", icon);
     RegCloseKey(hKey);
