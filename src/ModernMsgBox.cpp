@@ -1,11 +1,56 @@
 #include "../include/ModernMsgBox.h"
 #include "../include/ModernUI.h"
+#include "../include/Localization.h"
+
+bool ModernMsgBox::s_suppressed = false;
+
+void ModernMsgBox::SetSuppressed(bool suppressed) {
+    s_suppressed = suppressed;
+}
+
+bool ModernMsgBox::IsSuppressed() {
+    return s_suppressed;
+}
+
+namespace {
+
+int MeasureLongestTextLineWidth(HDC hdc, const std::wstring& text) {
+    int maxWidth = 0;
+    size_t pos = 0;
+
+    while (pos <= text.length()) {
+        size_t end = text.find_first_of(L"\r\n", pos);
+        std::wstring line = text.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
+
+        if (!line.empty()) {
+            SIZE lineSize = {};
+            if (GetTextExtentPoint32W(hdc, line.c_str(), static_cast<int>(line.length()), &lineSize)) {
+                if (lineSize.cx > maxWidth) maxWidth = lineSize.cx;
+            }
+        }
+
+        if (end == std::wstring::npos) break;
+        pos = end + 1;
+        if (end + 1 < text.length() && text[end] == L'\r' && text[end + 1] == L'\n') {
+            pos = end + 2;
+        }
+    }
+
+    return maxWidth;
+}
+
+bool HasExplicitLineBreaks(const std::wstring& text) {
+    return text.find_first_of(L"\r\n") != std::wstring::npos;
+}
+
+} // namespace
 
 struct MsgBoxData {
     std::wstring text;
     std::wstring title;
     UINT type;
     int result = IDCANCEL;
+    bool done = false;
     
     RECT btn1; std::wstring btn1Text; bool hover1 = false; int ret1 = IDOK;
     RECT btn2; std::wstring btn2Text; bool hover2 = false; int ret2 = IDCANCEL;
@@ -90,13 +135,17 @@ static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
+        pData->done = true;
         return 0;
     }
     return DefWindowProcW(hwnd, uMsg, wParam, lParam);
 }
 
 int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring& title, UINT type) {
+    if (s_suppressed && (type & MB_YESNO) != MB_YESNO) {
+        return IDOK;
+    }
+
     ModernUI::Initialize(); // Ensure GDI+ is loaded (it uses ref counting internally if we designed it right, but actually we use a global token. GdiplusStartup handles multiple calls safely if matched by GdiplusShutdown, but our simple Initialize does not track counts. Fortunately, calling it again is mostly harmless or we can skip it since the main process already runs it before any message box triggers).
 
     MsgBoxData data;
@@ -113,24 +162,31 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
 
-    SIZE textSize;
-    GetTextExtentPoint32W(hdc, text.c_str(), (int)text.length(), &textSize);
+    int longestLineWidth = MeasureLongestTextLineWidth(hdc, text);
 
     SelectObject(hdc, oldFont);
     DeleteObject(hFont);
 
-    // Calculate optimal width with padding
-    int clientW = textSize.cx + 60; // text width + padding
+    // Calculate width from real content lines. Multi-line summaries should not
+    // become wide just because the full message contains many short lines.
+    int maxClientW = HasExplicitLineBreaks(text) ? 520 : 600;
+    int clientW = longestLineWidth + 60; // longest visible line + padding
     if (clientW < 250) clientW = 250; // minimum width
-    if (clientW > 600) clientW = 600; // maximum width
+    if (clientW > maxClientW) clientW = maxClientW; // wrap long lines/paragraphs
 
     // Measure text height with the chosen width
     int textH = ModernUI::MeasureTextHeight(hdc, clientW - 40, text.c_str(), 11, false);
     ReleaseDC(NULL, hdc);
 
+    // Calculate max height based on screen size (50% of screen height)
+    int scrH = GetSystemMetrics(SM_CYSCREEN);
+    int maxClientH = (scrH / 2) - 50; // 50% screen height minus window frame
+    if (maxClientH < 300) maxClientH = 300; // absolute minimum
+    if (maxClientH > 800) maxClientH = 800; // absolute maximum
+
     int clientH = textH + 20 + 46 + 10; // text + top padding + button area + safety margin
     if (clientH < 110) clientH = 110;
-    if (clientH > 600) clientH = 600; // cap for extremely long text
+    if (clientH > maxClientH) clientH = maxClientH;
 
     // configure buttons
     int btnW = 76; int btnH = 26;
@@ -138,13 +194,16 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
 
     if ((type & MB_YESNO) == MB_YESNO) {
         data.hasBtn2 = true;
-        data.btn1Text = L"Yes"; data.ret1 = IDYES;
-        data.btn2Text = L"No";  data.ret2 = IDNO;
+        data.btn1Text = VitraLocalization::PickString(L"Yes", L"\u662f");
+        data.ret1 = IDYES;
+        data.btn2Text = VitraLocalization::PickString(L"No", L"\u5426");
+        data.ret2 = IDNO;
 
         data.btn1 = { clientW - 16 - btnW, btnY, clientW - 16, btnY + btnH };
         data.btn2 = { clientW - 16 - btnW*2 - 8, btnY, clientW - 16 - btnW - 8, btnY + btnH };
     } else {
-        data.btn1Text = L"OK"; data.ret1 = IDOK;
+        data.btn1Text = VitraLocalization::PickString(L"OK", L"\u786e\u5b9a");
+        data.ret1 = IDOK;
         data.btn1 = { clientW - 16 - btnW, btnY, clientW - 16, btnY + btnH };
     }
 
@@ -166,7 +225,6 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
 
     // Center window on screen
     int scrW = GetSystemMetrics(SM_CXSCREEN);
-    int scrH = GetSystemMetrics(SM_CYSCREEN);
     int x = (scrW - winW) / 2;
     int y = (scrH - winH) / 2;
 
@@ -185,7 +243,7 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
     
     // Modal loop
     MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0)) {
+    while (!data.done && GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
