@@ -1,6 +1,16 @@
 #include "../include/ModernMsgBox.h"
 #include "../include/ModernUI.h"
 
+bool ModernMsgBox::s_suppressed = false;
+
+void ModernMsgBox::SetSuppressed(bool suppressed) {
+    s_suppressed = suppressed;
+}
+
+bool ModernMsgBox::IsSuppressed() {
+    return s_suppressed;
+}
+
 struct MsgBoxData {
     std::wstring text;
     std::wstring title;
@@ -97,6 +107,12 @@ static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
 }
 
 int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring& title, UINT type) {
+    if (s_suppressed) {
+        // Return appropriate default based on type
+        if ((type & MB_YESNO) == MB_YESNO) return IDYES;
+        return IDOK;
+    }
+
     ModernUI::Initialize(); // Ensure GDI+ is loaded (it uses ref counting internally if we designed it right, but actually we use a global token. GdiplusStartup handles multiple calls safely if matched by GdiplusShutdown, but our simple Initialize does not track counts. Fortunately, calling it again is mostly harmless or we can skip it since the main process already runs it before any message box triggers).
 
     MsgBoxData data;
@@ -128,9 +144,15 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
     int textH = ModernUI::MeasureTextHeight(hdc, clientW - 40, text.c_str(), 11, false);
     ReleaseDC(NULL, hdc);
 
+    // Calculate max height based on screen size (50% of screen height)
+    int scrH = GetSystemMetrics(SM_CYSCREEN);
+    int maxClientH = (scrH / 2) - 50; // 50% screen height minus window frame
+    if (maxClientH < 300) maxClientH = 300; // absolute minimum
+    if (maxClientH > 800) maxClientH = 800; // absolute maximum
+
     int clientH = textH + 20 + 46 + 10; // text + top padding + button area + safety margin
     if (clientH < 110) clientH = 110;
-    if (clientH > 600) clientH = 600; // cap for extremely long text
+    if (clientH > maxClientH) clientH = maxClientH;
 
     // configure buttons
     int btnW = 76; int btnH = 26;
@@ -166,7 +188,6 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
 
     // Center window on screen
     int scrW = GetSystemMetrics(SM_CXSCREEN);
-    int scrH = GetSystemMetrics(SM_CYSCREEN);
     int x = (scrW - winW) / 2;
     int y = (scrH - winH) / 2;
 

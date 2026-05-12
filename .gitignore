@@ -9,6 +9,7 @@
 build/
 buildcheck/
 buildverify/
+obj/
 x64/
 Debug/
 Release/

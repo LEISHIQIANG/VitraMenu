@@ -6,6 +6,7 @@
 #include "../include/UIManager.h"
 #include "../include/FeatureManager.h"
 #include "../include/ModernMsgBox.h"
+#include "../include/BatchCoordinator.h"
 #include <shellapi.h>
 #include <string>
 #include <vector>
@@ -96,7 +97,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
                 int mode = 1;
                 try { mode = std::stoi(args[2]); } catch (...) {}
                 target = args[3];
-                FeatureManager::QuickRename(target, mode);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::QuickRename(target, mode);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"rename", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"rename", L"VitraMenu - Quick Rename");
                 return 0;
             }
 
@@ -126,12 +131,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
             }
 
             if (flag == L"/unlock" && !target.empty()) {
-                FeatureManager::UnlockFile(target);
+                bool success = FeatureManager::UnlockFile(target);
+                BatchCoordinator::RecordResult(L"unlock", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"unlock", L"VitraMenu - Unlock");
                 return 0;
             }
 
             if (flag == L"/encoding" && args.size() >= 4) {
-                FeatureManager::ConvertEncoding(args[3], args[2]);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ConvertEncoding(args[3], args[2]);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"encoding", args[3], success);
+                BatchCoordinator::ShowConsolidatedNotification(L"encoding", L"VitraMenu - Convert Encoding");
                 return 0;
             }
 
@@ -183,19 +194,35 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
             }
 
             if (flag == L"/fw_out_block" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, false, false);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, false, false, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"firewall", L"VitraMenu - Firewall Rules");
                 return 0;
             }
             if (flag == L"/fw_in_block" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, true, false);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, true, false, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"firewall", L"VitraMenu - Firewall Rules");
                 return 0;
             }
             if (flag == L"/fw_out_allow" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, false, true);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, false, true, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"firewall", L"VitraMenu - Firewall Rules");
                 return 0;
             }
             if (flag == L"/fw_in_allow" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, true, true);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, true, true, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"firewall", L"VitraMenu - Firewall Rules");
                 return 0;
             }
 
@@ -220,22 +247,38 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
                     (filePath.back() == L'\\' || filePath.back() == L'/')) {
                     filePath.pop_back();
                 }
-                FeatureManager::CopyFileHash(filePath, algo);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::CopyFileHash(filePath, algo);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"hash", filePath, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"hash", L"VitraMenu - File Hash");
                 return 0;
             }
 
             if (flag == L"/takeown" && !target.empty()) {
-                FeatureManager::TakeOwnership(target);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::TakeOwnership(target);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"takeown", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"takeown", L"VitraMenu - Take Ownership");
                 return 0;
             }
 
             if (flag == L"/clearreadonly" && !target.empty()) {
-                FeatureManager::ClearReadOnlyAttribute(target);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ClearReadOnlyAttribute(target);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"clearreadonly", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"clearreadonly", L"VitraMenu - Clear Read-only");
                 return 0;
             }
 
             if (flag == L"/superdelete" && !target.empty()) {
-                FeatureManager::SuperDelete(target);
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::SuperDelete(target);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"superdelete", target, success);
+                BatchCoordinator::ShowConsolidatedNotification(L"superdelete", L"VitraMenu - Super Delete");
                 return 0;
             }
 
