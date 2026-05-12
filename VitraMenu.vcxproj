@@ -15,6 +15,7 @@
     <ProjectGuid>{12345678-1234-1234-1234-123456789012}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>VitraMenu</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -48,6 +49,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>d2d1.lib;dwrite.lib;windowscodecs.lib;dwmapi.lib;shlwapi.lib;user32.lib;gdi32.lib;advapi32.lib;comctl32.lib;gdiplus.lib;ole32.lib;uuid.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -76,6 +78,7 @@
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <AdditionalDependencies>d2d1.lib;dwrite.lib;windowscodecs.lib;dwmapi.lib;shlwapi.lib;user32.lib;gdi32.lib;advapi32.lib;comctl32.lib;gdiplus.lib;ole32.lib;uuid.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -86,6 +89,7 @@
     <ClCompile Include="src\MenuInstaller.cpp" />
     <ClCompile Include="src\ModernUI.cpp" />
     <ClCompile Include="src\ModernMsgBox.cpp" />
+    <ClCompile Include="src\BatchCoordinator.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\UIManager.h" />
@@ -94,6 +98,7 @@
     <ClInclude Include="include\MenuInstaller.h" />
     <ClInclude Include="include\ModernUI.h" />
     <ClInclude Include="include\ModernMsgBox.h" />
+    <ClInclude Include="include\BatchCoordinator.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="VitraMenu.rc" />
