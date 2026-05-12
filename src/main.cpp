@@ -6,6 +6,8 @@
 #include "../include/UIManager.h"
 #include "../include/FeatureManager.h"
 #include "../include/ModernMsgBox.h"
+#include "../include/BatchCoordinator.h"
+#include "../include/Localization.h"
 #include <shellapi.h>
 #include <string>
 #include <vector>
@@ -33,6 +35,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
     std::vector<std::wstring> args;
     for (int i = 0; i < argc; ++i) args.push_back(argv[i]);
     LocalFree(argv);
+
+    auto LText = [](const wchar_t* en, const wchar_t* cn) -> std::wstring {
+        return VitraLocalization::PickString(en, cn);
+    };
 
     auto isKnownCommandFlag = [](const std::wstring& flag) -> bool {
         return flag == L"/copypath" ||
@@ -96,7 +102,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
                 int mode = 1;
                 try { mode = std::stoi(args[2]); } catch (...) {}
                 target = args[3];
-                FeatureManager::QuickRename(target, mode);
+                BatchCoordinator::BeginOperation(L"rename");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::QuickRename(target, mode);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"rename", target, success);
+                BatchCoordinator::EndOperation(L"rename");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"rename", LText(L"VitraMenu - Quick Rename", L"VitraMenu - \u5feb\u901f\u91cd\u547d\u540d"));
                 return 0;
             }
 
@@ -126,12 +139,27 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
             }
 
             if (flag == L"/unlock" && !target.empty()) {
-                FeatureManager::UnlockFile(target);
+                BatchCoordinator::BeginOperation(L"unlock");
+                std::wstring unlockBatchMessage;
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::UnlockFile(target, &unlockBatchMessage);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"unlock", target, success, unlockBatchMessage);
+                BatchCoordinator::EndOperation(L"unlock");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"unlock", LText(L"VitraMenu - Unlock", L"VitraMenu - \u89e3\u9501\u6587\u4ef6"));
                 return 0;
             }
 
             if (flag == L"/encoding" && args.size() >= 4) {
-                FeatureManager::ConvertEncoding(args[3], args[2]);
+                BatchCoordinator::BeginOperation(L"encoding");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ConvertEncoding(args[3], args[2]);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"encoding", args[3], success);
+                BatchCoordinator::EndOperation(L"encoding");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"encoding", LText(L"VitraMenu - Convert Encoding", L"VitraMenu - \u8f6c\u6362\u7f16\u7801"));
                 return 0;
             }
 
@@ -183,19 +211,47 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
             }
 
             if (flag == L"/fw_out_block" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, false, false);
+                BatchCoordinator::BeginOperation(L"firewall");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, false, false, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::EndOperation(L"firewall");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"firewall", LText(L"VitraMenu - Firewall Rules", L"VitraMenu - \u9632\u706b\u5899\u89c4\u5219"));
                 return 0;
             }
             if (flag == L"/fw_in_block" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, true, false);
+                BatchCoordinator::BeginOperation(L"firewall");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, true, false, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::EndOperation(L"firewall");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"firewall", LText(L"VitraMenu - Firewall Rules", L"VitraMenu - \u9632\u706b\u5899\u89c4\u5219"));
                 return 0;
             }
             if (flag == L"/fw_out_allow" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, false, true);
+                BatchCoordinator::BeginOperation(L"firewall");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, false, true, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::EndOperation(L"firewall");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"firewall", LText(L"VitraMenu - Firewall Rules", L"VitraMenu - \u9632\u706b\u5899\u89c4\u5219"));
                 return 0;
             }
             if (flag == L"/fw_in_allow" && !target.empty()) {
-                FeatureManager::ApplyExeFirewallRule(target, true, true);
+                BatchCoordinator::BeginOperation(L"firewall");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ApplyExeFirewallRule(target, true, true, true);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"firewall", target, success);
+                BatchCoordinator::EndOperation(L"firewall");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"firewall", LText(L"VitraMenu - Firewall Rules", L"VitraMenu - \u9632\u706b\u5899\u89c4\u5219"));
                 return 0;
             }
 
@@ -212,7 +268,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
                     algo = L"sha256";
                     filePath = args[2];
                 } else {
-                    ModernMsgBox::Show(nullptr, L"File hash: missing file path or algorithm.", L"VitraMenu",
+                    ModernMsgBox::Show(nullptr,
+                                       LText(L"File hash: missing file path or algorithm.",
+                                             L"\u6587\u4ef6\u54c8\u5e0c\uff1a\u7f3a\u5c11\u6587\u4ef6\u8def\u5f84\u6216\u7b97\u6cd5\u3002").c_str(),
+                                       L"VitraMenu",
                                        MB_OK | MB_ICONWARNING);
                     return 1;
                 }
@@ -220,34 +279,72 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
                     (filePath.back() == L'\\' || filePath.back() == L'/')) {
                     filePath.pop_back();
                 }
-                FeatureManager::CopyFileHash(filePath, algo);
-                return 0;
+                bool success = FeatureManager::CopyFileHash(filePath, algo);
+                return success ? 0 : 1;
             }
 
             if (flag == L"/takeown" && !target.empty()) {
-                FeatureManager::TakeOwnership(target);
+                BatchCoordinator::BeginOperation(L"takeown");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::TakeOwnership(target);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"takeown", target, success);
+                BatchCoordinator::EndOperation(L"takeown");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"takeown", LText(L"VitraMenu - Take Ownership", L"VitraMenu - \u83b7\u53d6\u6240\u6709\u6743"));
                 return 0;
             }
 
             if (flag == L"/clearreadonly" && !target.empty()) {
-                FeatureManager::ClearReadOnlyAttribute(target);
+                BatchCoordinator::BeginOperation(L"clearreadonly");
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::ClearReadOnlyAttribute(target);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"clearreadonly", target, success);
+                BatchCoordinator::EndOperation(L"clearreadonly");
+                BatchCoordinator::ShowConsolidatedNotification(
+                    L"clearreadonly", LText(L"VitraMenu - Clear Read-only", L"VitraMenu - \u6e05\u9664\u53ea\u8bfb\u5c5e\u6027"));
                 return 0;
             }
 
             if (flag == L"/superdelete" && !target.empty()) {
-                FeatureManager::SuperDelete(target);
+                BatchCoordinator::BeginOperation(L"superdelete");
+                const std::wstring superDeleteTitle = LText(L"VitraMenu - Super Delete", L"VitraMenu - \u8d85\u7ea7\u5220\u9664");
+                if (!BatchCoordinator::ConfirmDestructiveOperation(L"superdelete", target, superDeleteTitle)) {
+                    BatchCoordinator::EndOperation(L"superdelete");
+                    return 0;
+                }
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::SuperDelete(target);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"superdelete", target, success);
+                BatchCoordinator::EndOperation(L"superdelete");
+                BatchCoordinator::ShowConsolidatedNotification(L"superdelete", superDeleteTitle);
                 return 0;
             }
 
             if (flag == L"/cleanempty" && !target.empty()) {
-                FeatureManager::CleanEmptyFolders(target);
+                BatchCoordinator::BeginOperation(L"cleanempty");
+                const std::wstring cleanEmptyTitle = LText(L"VitraMenu - Clean Empty Folders",
+                                                           L"VitraMenu - \u6e05\u7406\u7a7a\u6587\u4ef6\u5939");
+                if (!BatchCoordinator::ConfirmDestructiveOperation(L"cleanempty", target, cleanEmptyTitle)) {
+                    BatchCoordinator::EndOperation(L"cleanempty");
+                    return 0;
+                }
+                std::wstring cleanEmptyMessage;
+                ModernMsgBox::SetSuppressed(true);
+                bool success = FeatureManager::CleanEmptyFolders(target, &cleanEmptyMessage);
+                ModernMsgBox::SetSuppressed(false);
+                BatchCoordinator::RecordResult(L"cleanempty", target, success, cleanEmptyMessage);
+                BatchCoordinator::EndOperation(L"cleanempty");
+                BatchCoordinator::ShowConsolidatedNotification(L"cleanempty", cleanEmptyTitle);
                 return 0;
             }
 
             FeatureManager::LogResult(L"UnknownFlag", flag, false, L"Known flag but invalid invocation");
             ModernMsgBox::Show(nullptr,
-                              L"Unrecognized command-line option. If this came from the context menu, "
-                              L"reinstall the menu entries from VitraMenu.",
+                              LText(L"Unrecognized command-line option. If this came from the context menu, reinstall the menu entries from VitraMenu.",
+                                    L"\u65e0\u6cd5\u8bc6\u522b\u547d\u4ee4\u884c\u9009\u9879\u3002\u5982\u679c\u8fd9\u6765\u81ea\u53f3\u952e\u83dc\u5355\uff0c\u8bf7\u5728 VitraMenu \u4e2d\u91cd\u65b0\u5b89\u88c5\u83dc\u5355\u9879\u3002").c_str(),
                               L"VitraMenu", MB_OK | MB_ICONWARNING);
             return 1;
         }
@@ -257,7 +354,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
     FeatureManager::EnsureSelfFirewallBlocked();
     UIManager ui(hInstance);
     if (!ui.InitializeWindow()) {
-        MessageBoxW(NULL, L"Window initialization failed", L"VitraMenu Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL,
+                    LText(L"Window initialization failed",
+                          L"\u7a97\u53e3\u521d\u59cb\u5316\u5931\u8d25").c_str(),
+                    LText(L"VitraMenu Error", L"VitraMenu \u9519\u8bef").c_str(),
+                    MB_OK | MB_ICONERROR);
         return 1;
     }
     return ui.RunMessageLoop();
