@@ -12,7 +12,103 @@
 #include <string>
 #include <vector>
 
+namespace {
+
+DWORD WINAPI ProcessLifetimeLimitThread(LPVOID) {
+    for (DWORD elapsed = 0; elapsed < 30000; elapsed += 250) {
+        Sleep(250);
+    }
+    while (ModernMsgBox::HasActiveDialog()) {
+        Sleep(250);
+    }
+    TerminateProcess(GetCurrentProcess(), 124);
+    return 0;
+}
+
+void StartProcessLifetimeLimit() {
+    HANDLE thread = CreateThread(nullptr, 0, ProcessLifetimeLimitThread, nullptr, 0, nullptr);
+    if (thread) CloseHandle(thread);
+}
+
+std::wstring QuoteCommandLineArg(const std::wstring& arg) {
+    if (arg.empty()) return L"\"\"";
+
+    bool needsQuotes = false;
+    for (wchar_t c : arg) {
+        if (c == L' ' || c == L'\t' || c == L'\n' || c == L'\v' || c == L'"') {
+            needsQuotes = true;
+            break;
+        }
+    }
+    if (!needsQuotes) return arg;
+
+    std::wstring quoted = L"\"";
+    size_t backslashes = 0;
+    for (wchar_t c : arg) {
+        if (c == L'\\') {
+            ++backslashes;
+        } else if (c == L'"') {
+            quoted.append(backslashes * 2 + 1, L'\\');
+            quoted.push_back(c);
+            backslashes = 0;
+        } else {
+            quoted.append(backslashes, L'\\');
+            backslashes = 0;
+            quoted.push_back(c);
+        }
+    }
+    quoted.append(backslashes * 2, L'\\');
+    quoted.push_back(L'"');
+    return quoted;
+}
+
+std::wstring JoinCommandLineArgs(const std::vector<std::wstring>& args, size_t first) {
+    std::wstring joined;
+    for (size_t i = first; i < args.size(); ++i) {
+        if (!joined.empty()) joined.push_back(L' ');
+        joined += QuoteCommandLineArg(args[i]);
+    }
+    return joined;
+}
+
+bool IsRunningElevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+
+    TOKEN_ELEVATION elevation = {};
+    DWORD size = 0;
+    const BOOL ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
+
+bool RelaunchSelfElevated(const std::vector<std::wstring>& args) {
+    wchar_t exePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH)) return false;
+
+    const std::wstring params = JoinCommandLineArgs(args, 1);
+
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = L"runas";
+    sei.lpFile = exePath;
+    sei.lpParameters = params.empty() ? nullptr : params.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+
+    return ShellExecuteExW(&sei) != FALSE;
+}
+
+bool CommandRequiresElevation(const std::wstring& flag) {
+    return flag != L"/claudecode" &&
+           flag != L"/codex" &&
+           flag != L"/openhosts" &&
+           flag != L"/superdelete";
+}
+
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
+    StartProcessLifetimeLimit();
+
     // Prefer per-monitor DPI awareness so acrylic surfaces and text scale consistently.
     const HMODULE user32 = GetModuleHandleW(L"user32.dll");
     if (user32 != nullptr) {
@@ -67,6 +163,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
                flag == L"/takeown" ||
                flag == L"/clearreadonly" ||
                flag == L"/superdelete" ||
+               flag == L"/superdelete_worker" ||
                flag == L"/cleanempty";
     };
 
@@ -82,6 +179,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
         if (!isKnownCommandFlag(flag)) {
             FeatureManager::LogResult(L"IgnoredFlag", flag, true, L"Unknown external argument; launching UI mode");
         } else {
+            if (CommandRequiresElevation(flag) && !IsRunningElevated()) {
+                const bool elevated = RelaunchSelfElevated(args);
+                FeatureManager::LogResult(L"ElevateCommand", flag, elevated);
+                if (!elevated) {
+                    ModernMsgBox::Show(nullptr,
+                                      LText(L"Administrator approval is required for this command.",
+                                            L"\u6b64\u547d\u4ee4\u9700\u8981\u7ba1\u7406\u5458\u6388\u6743\u3002").c_str(),
+                                      L"VitraMenu",
+                                      MB_OK | MB_ICONINFORMATION);
+                    return 1;
+                }
+                return 0;
+            }
+
+            if (flag == L"/superdelete_worker") {
+                return BatchCoordinator::RunSuperDeleteWorker();
+            }
 
             // Target path is usually the last argument
             std::wstring target;
@@ -310,14 +424,35 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
             if (flag == L"/superdelete" && !target.empty()) {
                 BatchCoordinator::BeginOperation(L"superdelete");
                 const std::wstring superDeleteTitle = LText(L"VitraMenu - Super Delete", L"VitraMenu - \u8d85\u7ea7\u5220\u9664");
-                if (!BatchCoordinator::ConfirmDestructiveOperation(L"superdelete", target, superDeleteTitle)) {
+                bool elevatedWorkerStarted = false;
+                if (!BatchCoordinator::ConfirmDestructiveOperation(L"superdelete", target, superDeleteTitle, &elevatedWorkerStarted)) {
                     BatchCoordinator::EndOperation(L"superdelete");
                     return 0;
                 }
+                if (!IsRunningElevated()) {
+                    bool workerLaunchFailed = false;
+                    if (elevatedWorkerStarted) {
+                        const bool workerReady = BatchCoordinator::WaitForSuperDeleteWorkerReadyOrFailed(1000, workerLaunchFailed);
+                        if (!workerReady) workerLaunchFailed = true;
+                    }
+                    BatchCoordinator::EndOperation(L"superdelete");
+                    if (workerLaunchFailed) {
+                        ModernMsgBox::Show(nullptr,
+                                          LText(L"Administrator approval is required for Super Delete.",
+                                                L"\u8d85\u7ea7\u5220\u9664\u9700\u8981\u7ba1\u7406\u5458\u6388\u6743\u3002").c_str(),
+                                          L"VitraMenu",
+                                          MB_OK | MB_ICONINFORMATION);
+                        FeatureManager::LogResult(L"SuperDeleteWorker", target, false, L"Worker launch failed");
+                        return 1;
+                    }
+                    BatchCoordinator::ShowConsolidatedNotification(L"superdelete", superDeleteTitle);
+                    return 0;
+                }
                 ModernMsgBox::SetSuppressed(true);
-                bool success = FeatureManager::SuperDelete(target);
+                std::wstring superDeleteMessage;
+                bool success = FeatureManager::SuperDelete(target, &superDeleteMessage);
                 ModernMsgBox::SetSuppressed(false);
-                BatchCoordinator::RecordResult(L"superdelete", target, success);
+                BatchCoordinator::RecordResult(L"superdelete", target, success, superDeleteMessage);
                 BatchCoordinator::EndOperation(L"superdelete");
                 BatchCoordinator::ShowConsolidatedNotification(L"superdelete", superDeleteTitle);
                 return 0;

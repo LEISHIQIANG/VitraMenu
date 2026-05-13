@@ -542,6 +542,40 @@ bool FindEmptyFoldersOnePass(const std::wstring& path, std::vector<std::wstring>
     return hasRealContent;
 }
 
+std::wstring NormalizePathKey(std::wstring path) {
+    while (path.length() > 3 && (path.back() == L'\\' || path.back() == L'/')) {
+        path.pop_back();
+    }
+    for (wchar_t& c : path) {
+        if (c == L'/') c = L'\\';
+        else c = static_cast<wchar_t>(towlower(c));
+    }
+    return path;
+}
+
+bool IsAncestorPath(const std::wstring& ancestor, const std::wstring& child) {
+    std::wstring a = NormalizePathKey(ancestor);
+    std::wstring c = NormalizePathKey(child);
+    if (a.empty() || c.size() <= a.size()) return false;
+    return c.compare(0, a.size(), a) == 0 && c[a.size()] == L'\\';
+}
+
+std::vector<std::wstring> GetMostSpecificFolders(const std::vector<std::wstring>& folders) {
+    std::vector<std::wstring> result;
+    result.reserve(folders.size());
+    for (size_t i = 0; i < folders.size(); ++i) {
+        bool hasNestedFolder = false;
+        for (size_t j = 0; j < folders.size(); ++j) {
+            if (i != j && IsAncestorPath(folders[i], folders[j])) {
+                hasNestedFolder = true;
+                break;
+            }
+        }
+        if (!hasNestedFolder) result.push_back(folders[i]);
+    }
+    return result;
+}
+
 void BuildExistingFileNameCache(const std::wstring& dir, std::unordered_set<std::wstring>& files) {
     WIN32_FIND_DATAW fd;
     std::wstring pattern = dir + L"\\*";
@@ -1301,18 +1335,28 @@ bool FeatureManager::CleanEmptyFolders(const std::wstring& folderPath, std::wstr
             LogResult(L"CleanEmpty", folderPath, false, L"Scan incomplete");
             return false;
         }
+        std::wstring noEmptyMsg = LText(L"No empty folders found.",
+                                        L"\u672a\u627e\u5230\u7a7a\u6587\u4ef6\u5939\u3002");
+        if (batchMessage) *batchMessage = noEmptyMsg;
         if (!batchMessage && !ModernMsgBox::IsSuppressed())
             ModernMsgBox::Show(nullptr,
-                               LText(L"No empty folders found.",
-                                     L"\u672a\u627e\u5230\u7a7a\u6587\u4ef6\u5939\u3002").c_str(),
+                               noEmptyMsg.c_str(),
                                L"VitraMenu", MB_OK | MB_ICONINFORMATION);
         LogResult(L"CleanEmpty", folderPath, true, L"No empty folders");
         return true;
     }
 
-    std::wstring msg = LText(L"Found ", L"\u627e\u5230 ") + std::to_wstring(emptyFolders.size()) +
-                       LText(L" empty folder(s):\n\n", L" \u4e2a\u7a7a\u6587\u4ef6\u5939\uff1a\n\n");
-    appendFolderList(msg, emptyFolders);
+    std::vector<std::wstring> displayFolders = GetMostSpecificFolders(emptyFolders);
+    const bool hasAutoParentDeletes = displayFolders.size() != emptyFolders.size();
+
+    std::wstring msg = LText(L"Found ", L"\u627e\u5230 ") + std::to_wstring(displayFolders.size()) +
+                       LText(L" directly empty folder(s):\n\n",
+                             L" \u4e2a\u76f4\u63a5\u4e3a\u7a7a\u7684\u6587\u4ef6\u5939\uff1a\n\n");
+    appendFolderList(msg, displayFolders);
+    if (hasAutoParentDeletes) {
+        msg += LText(L"\nParent folders that become empty after cleanup will also be removed.",
+                     L"\n\u6e05\u7406\u540e\u53d8\u4e3a\u7a7a\u7684\u7236\u7ea7\u6587\u4ef6\u5939\u4e5f\u4f1a\u4e00\u5e76\u5220\u9664\u3002");
+    }
     msg += LText(L"\nDelete them?", L"\n\u662f\u5426\u5220\u9664\uff1f");
     if (!scanOk) {
         msg += LText(L"\n\nSome folders could not be scanned.",
@@ -1610,9 +1654,9 @@ bool FeatureManager::OpenHosts() {
     
     ShellExecuteW(NULL, L"explore", hostsDir.c_str(), NULL, NULL, SW_SHOWNORMAL);
 
-    SHELLEXECUTEINFOW sei = { sizeof(sei) };
-    sei.lpVerb = L"runas";
     std::wstring notepad = GetSystemExecutable(L"notepad.exe");
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = nullptr;
     sei.lpFile = notepad.c_str();
     sei.lpParameters = hostsFile.c_str();
     sei.nShow = SW_SHOWNORMAL;
@@ -2280,7 +2324,78 @@ static void SuperDeleteParallel(const std::wstring& path) {
     }
 }
 
-bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
+static bool FindLockInTree(const std::wstring& path,
+                           std::vector<LockingProcess>& processes,
+                           std::wstring& lockedPath,
+                           int& visited) {
+    if (++visited > 512) return false;
+
+    DWORD attr = GetFileAttributesW(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) return false;
+
+    std::vector<LockingProcess> locks;
+    QueryRestartManagerLocks(path, locks);
+    if (!locks.empty()) {
+        processes = locks;
+        lockedPath = path;
+        return true;
+    }
+
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) == 0) return false;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW((path + L"\\*").c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    bool found = false;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        std::wstring child = path + L"\\" + fd.cFileName;
+        if (FindLockInTree(child, processes, lockedPath, visited)) {
+            found = true;
+            break;
+        }
+        if (visited > 512) break;
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+    return found;
+}
+
+static bool IsDirectoryEmptyForDelete(const std::wstring& normalizedPath) {
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW((normalizedPath + L"\\*").c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    bool empty = true;
+    do {
+        if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+            empty = false;
+            break;
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+    return empty;
+}
+
+static std::wstring BuildDeleteFailureMessage(const std::wstring& targetPath, DWORD errorCode) {
+    std::wstring msg;
+    if (errorCode == ERROR_SHARING_VIOLATION || errorCode == ERROR_LOCK_VIOLATION ||
+        errorCode == ERROR_ACCESS_DENIED || errorCode == ERROR_CURRENT_DIRECTORY) {
+        msg = LText(L"Delete failed because the item is in use or access was denied:\n\n",
+                    L"\u5220\u9664\u5931\u8d25\uff0c\u6b64\u9879\u76ee\u53ef\u80fd\u6b63\u88ab\u5360\u7528\u6216\u6743\u9650\u4e0d\u8db3\uff1a\n\n");
+    } else {
+        msg = T(Msg::DeleteFailed);
+    }
+    msg += targetPath;
+    msg += LText(L"\n\nSystem error: ", L"\n\n\u7cfb\u7edf\u9519\u8bef\uff1a");
+    msg += std::to_wstring(errorCode);
+    return msg;
+}
+
+bool FeatureManager::SuperDelete(const std::wstring& targetPath, std::wstring* resultMessage) {
+    if (resultMessage) resultMessage->clear();
     std::wstring normalizedPath = targetPath;
     if (targetPath.size() >= 2 && targetPath[1] == L':' && targetPath.find(L"\\\\?\\") != 0) {
         normalizedPath = L"\\\\?\\" + targetPath;
@@ -2304,6 +2419,45 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
             LogResult(L"SuperDelete", targetPath, false, L"User cancelled");
             return false;
         }
+    }
+
+    if (isDir && IsDirectoryEmptyForDelete(normalizedPath)) {
+        if (attr & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN))
+            SetFileAttributesW(normalizedPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        if (RemoveDirectoryW(normalizedPath.c_str())) {
+            LogResult(L"SuperDelete", targetPath, true, L"Deleted empty folder");
+            return true;
+        }
+
+        DWORD errorCode = GetLastError();
+        std::wstring msg = BuildDeleteFailureMessage(targetPath, errorCode);
+        if (resultMessage) *resultMessage = msg;
+        if (!ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr, msg.c_str(), T(Msg::Title), MB_OK | MB_ICONWARNING);
+        LogResult(L"SuperDelete", targetPath, false, L"Empty folder delete failed: " + std::to_wstring(errorCode));
+        return false;
+    }
+
+    std::vector<LockingProcess> lockingProcesses;
+    std::wstring lockedPath;
+    int visitedForLocks = 0;
+    if (isDir) {
+        FindLockInTree(targetPath, lockingProcesses, lockedPath, visitedForLocks);
+    } else {
+        QueryRestartManagerLocks(targetPath, lockingProcesses);
+        if (!lockingProcesses.empty()) lockedPath = targetPath;
+    }
+    if (!lockingProcesses.empty()) {
+        std::wstring msg = LText(L"Delete failed because the item is in use:\n\n",
+                                 L"\u5220\u9664\u5931\u8d25\uff0c\u56e0\u4e3a\u6b64\u9879\u76ee\u6b63\u5728\u88ab\u5360\u7528\uff1a\n\n");
+        msg += (lockedPath.empty() ? targetPath : lockedPath) + L"\n\n";
+        msg += LText(L"Locking process(es):\n", L"\u5360\u7528\u8fdb\u7a0b\uff1a\n");
+        msg += BuildProcessInfoText(lockingProcesses);
+        if (resultMessage) *resultMessage = msg;
+        if (!ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr, msg.c_str(), T(Msg::Title), MB_OK | MB_ICONWARNING);
+        LogResult(L"SuperDelete", targetPath, false, L"Item is locked");
+        return false;
     }
 
     auto pathGone = [&]() {
@@ -2345,11 +2499,18 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
     // Win32 native parallel delete runs concurrently with Git Bash
     std::thread win32Thread([&] { SuperDeleteParallel(targetPath); });
 
-    // Wait for both; Git Bash capped at 5s (only needed for special filenames like nul)
+    // Win32 handles normal paths. Give Git Bash only a short chance to finish
+    // special-name cleanup; locked files should fail quickly.
     win32Thread.join();
     if (hBash != INVALID_HANDLE_VALUE) {
-        WaitForSingleObject(hBash, 5000);
-        TerminateProcess(hBash, 1);
+        for (DWORD elapsed = 0; elapsed < 500; elapsed += 50) {
+            if (pathGone()) break;
+            if (WaitForSingleObject(hBash, 0) != WAIT_TIMEOUT) break;
+            Sleep(50);
+        }
+        if (WaitForSingleObject(hBash, 0) == WAIT_TIMEOUT) {
+            TerminateProcess(hBash, 1);
+        }
         CloseHandle(hBash);
     }
 
@@ -2362,6 +2523,9 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
             std::wstring errMsg = T(Msg::DeleteFailed) + targetPath;
             ModernMsgBox::Show(nullptr, errMsg.c_str(), T(Msg::Title), MB_OK | MB_ICONWARNING);
         }
+    }
+    if (!deleted && resultMessage) {
+        *resultMessage = T(Msg::DeleteFailed) + targetPath;
     }
 
     LogResult(L"SuperDelete", targetPath, deleted);

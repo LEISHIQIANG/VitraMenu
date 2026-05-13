@@ -48,7 +48,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalOptions>/MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/MANIFESTUAC:"level='asInvoker' uiAccess='false'" %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>d2d1.lib;dwrite.lib;windowscodecs.lib;dwmapi.lib;shlwapi.lib;user32.lib;gdi32.lib;advapi32.lib;comctl32.lib;gdiplus.lib;ole32.lib;uuid.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
@@ -78,7 +78,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
-      <AdditionalOptions>/MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/MANIFESTUAC:"level='asInvoker' uiAccess='false'" %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>d2d1.lib;dwrite.lib;windowscodecs.lib;dwmapi.lib;shlwapi.lib;user32.lib;gdi32.lib;advapi32.lib;comctl32.lib;gdiplus.lib;ole32.lib;uuid.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>

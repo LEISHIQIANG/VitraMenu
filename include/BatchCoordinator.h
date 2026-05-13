@@ -15,7 +15,10 @@ public:
     static void BeginOperation(const std::wstring& operation);
     static void EndOperation(const std::wstring& operation);
     static void RecordResult(const std::wstring& operation, const std::wstring& path, bool success, const std::wstring& message = L"");
-    static bool ConfirmDestructiveOperation(const std::wstring& operation, const std::wstring& path, const std::wstring& title);
+    static bool ConfirmDestructiveOperation(const std::wstring& operation, const std::wstring& path, const std::wstring& title,
+                                            bool* elevatedWorkerStarted = nullptr);
+    static bool WaitForSuperDeleteWorkerReadyOrFailed(DWORD timeoutMs, bool& launchFailed);
+    static int RunSuperDeleteWorker();
     static void ShowConsolidatedNotification(const std::wstring& operation, const std::wstring& title);
 
 private:

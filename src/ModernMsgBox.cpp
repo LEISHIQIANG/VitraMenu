@@ -3,6 +3,7 @@
 #include "../include/Localization.h"
 
 bool ModernMsgBox::s_suppressed = false;
+volatile LONG ModernMsgBox::s_activeDialogs = 0;
 
 void ModernMsgBox::SetSuppressed(bool suppressed) {
     s_suppressed = suppressed;
@@ -10,6 +11,10 @@ void ModernMsgBox::SetSuppressed(bool suppressed) {
 
 bool ModernMsgBox::IsSuppressed() {
     return s_suppressed;
+}
+
+bool ModernMsgBox::HasActiveDialog() {
+    return InterlockedCompareExchange(&s_activeDialogs, 0, 0) > 0;
 }
 
 namespace {
@@ -55,6 +60,7 @@ struct MsgBoxData {
     RECT btn1; std::wstring btn1Text; bool hover1 = false; int ret1 = IDOK;
     RECT btn2; std::wstring btn2Text; bool hover2 = false; int ret2 = IDCANCEL;
     bool hasBtn2 = false;
+    bool allowClose = false;
 };
 
 static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -83,7 +89,7 @@ static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
         DeleteObject(bgBrush);
         
         // draw msg text (title is now only in system caption)
-        RECT textR = { 20, 20, rc.right - 20, rc.bottom - 46 };
+        RECT textR = { 20, 20, rc.right - 20, pData->btn1.top - 10 };
         ModernUI::DrawTextWrap(memDC, textR, pData->text.c_str(), 11, false, RGB(44, 44, 46));
 
         // buttons
@@ -91,7 +97,7 @@ static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
 
         ModernUI::DrawButton(memDC, pData->btn1, pData->btn1Text.c_str(), pData->hover1, false, isDanger);
         if (pData->hasBtn2) {
-            ModernUI::DrawButton(memDC, pData->btn2, pData->btn2Text.c_str(), pData->hover2, false, false);
+            ModernUI::DrawButton(memDC, pData->btn2, pData->btn2Text.c_str(), pData->hover2, false, false, true);
         }
 
         BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
@@ -123,9 +129,11 @@ static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
         auto in = [](RECT r, int x, int y) { return (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom); };
         if (in(pData->btn1, x, y)) {
             pData->result = pData->ret1;
+            pData->allowClose = true;
             DestroyWindow(hwnd);
         } else if (pData->hasBtn2 && in(pData->btn2, x, y)) {
             pData->result = pData->ret2;
+            pData->allowClose = true;
             DestroyWindow(hwnd);
         }
         return 0;
@@ -142,6 +150,11 @@ static LRESULT CALLBACK MsgBoxProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
 }
 
 int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring& title, UINT type) {
+    return Show(parent, text, title, type, nullptr);
+}
+
+int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring& title, UINT type,
+                       const std::function<void()>& afterShow) {
     if (s_suppressed && (type & MB_YESNO) != MB_YESNO) {
         return IDOK;
     }
@@ -190,7 +203,9 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
 
     // configure buttons
     int btnW = 76; int btnH = 26;
-    int btnY = clientH - 16 - btnH; // bottom margin
+    int btnMargin = 10;
+    int btnGap = 6;
+    int btnY = clientH - btnMargin - btnH;
 
     if ((type & MB_YESNO) == MB_YESNO) {
         data.hasBtn2 = true;
@@ -199,12 +214,12 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
         data.btn2Text = VitraLocalization::PickString(L"No", L"\u5426");
         data.ret2 = IDNO;
 
-        data.btn1 = { clientW - 16 - btnW, btnY, clientW - 16, btnY + btnH };
-        data.btn2 = { clientW - 16 - btnW*2 - 8, btnY, clientW - 16 - btnW - 8, btnY + btnH };
+        data.btn1 = { clientW - btnMargin - btnW, btnY, clientW - btnMargin, btnY + btnH };
+        data.btn2 = { clientW - btnMargin - btnW*2 - btnGap, btnY, clientW - btnMargin - btnW - btnGap, btnY + btnH };
     } else {
         data.btn1Text = VitraLocalization::PickString(L"OK", L"\u786e\u5b9a");
         data.ret1 = IDOK;
-        data.btn1 = { clientW - 16 - btnW, btnY, clientW - 16, btnY + btnH };
+        data.btn1 = { clientW - btnMargin - btnW, btnY, clientW - btnMargin, btnY + btnH };
     }
 
     WNDCLASSEXW wc = { sizeof(wc) };
@@ -240,13 +255,16 @@ int ModernMsgBox::Show(HWND parent, const std::wstring& text, const std::wstring
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+    if (afterShow) afterShow();
     
     // Modal loop
+    InterlockedIncrement(&s_activeDialogs);
     MSG msg;
     while (!data.done && GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    InterlockedDecrement(&s_activeDialogs);
 
     return data.result;
 }

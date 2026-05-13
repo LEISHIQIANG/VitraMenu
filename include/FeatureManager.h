@@ -19,7 +19,7 @@ public:
     // -- System Utilities --
     static bool UnlockFile(const std::wstring& filePath, std::wstring* batchMessage = nullptr);
     static bool ConvertEncoding(const std::wstring& filePath, const std::wstring& encoding);
-    static bool SuperDelete(const std::wstring& targetPath);
+    static bool SuperDelete(const std::wstring& targetPath, std::wstring* resultMessage = nullptr);
 
     // -- System Tools (direct execute, no registry) --
     static bool OpenClaudeCode(const std::wstring& folderPath);

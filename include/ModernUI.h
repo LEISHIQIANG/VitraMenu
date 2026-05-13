@@ -25,7 +25,7 @@ public:
     static void DrawCard(HDC hdc, RECT rect, bool hover = false, bool checked = false);
     static void DrawButton(HDC hdc, RECT rect, const wchar_t* text,
                            bool hover = false, bool pressed = false,
-                           bool isDanger = false);
+                           bool isDanger = false, bool isSecondary = false);
     static void DrawCheckbox(HDC hdc, RECT rect, bool checked, bool hover = false);
     static void DrawLabel(HDC hdc, RECT rect, const wchar_t* text,
                           int fontSize = 13, bool bold = false,

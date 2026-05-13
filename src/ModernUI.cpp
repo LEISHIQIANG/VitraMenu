@@ -232,30 +232,38 @@ void ModernUI::DrawCard(HDC hdc, RECT rect, bool hover, bool checked) {
 }
 
 void ModernUI::DrawButton(HDC hdc, RECT rect, const wchar_t* text,
-                          bool hover, bool pressed, bool isDanger) {
-    COLORREF c1, c2;
-    if (isDanger) {
-        c1 = hover ? RGB(245, 70, 60) : RGB(230, 50, 45);
-        c2 = hover ? RGB(230, 50, 45) : RGB(200, 40, 35);
-    } else {
-        c1 = hover ? RGB(40, 140, 255) : RGB(0, 122, 255);
-        c2 = hover ? RGB(0, 122, 255) : RGB(0, 100, 220);
-    }
-    if (pressed) c1 = c2;
-
+                          bool hover, bool pressed, bool isDanger, bool isSecondary) {
     RECT r = rect;
     if (pressed) {
         r.top++;
         r.bottom++;
     }
-    DrawRoundedRect(hdc, r, 12, c1, 0);
+
+    COLORREF fill = RGB(37, 99, 235);
+    COLORREF border = 0;
+    COLORREF textColor = RGB(255, 255, 255);
+
+    if (isSecondary) {
+        fill = hover ? RGB(241, 245, 249) : RGB(248, 250, 252);
+        border = hover ? RGB(190, 199, 211) : RGB(210, 216, 226);
+        textColor = RGB(51, 65, 85);
+    } else if (isDanger) {
+        fill = hover ? RGB(239, 68, 68) : RGB(220, 60, 60);
+    } else if (hover) {
+        fill = RGB(29, 78, 216);
+    }
+    if (pressed) {
+        fill = isSecondary ? RGB(226, 232, 240) : (isDanger ? RGB(200, 45, 45) : RGB(30, 64, 175));
+    }
+
+    DrawRoundedRect(hdc, r, 6, fill, border);
 
     Font* font = GetCachedFont(12, true);
     if (!font) return;
 
     Graphics graphics(hdc);
     graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
-    SolidBrush textBrush(Color(255, 255, 255));
+    SolidBrush textBrush(Color(GetRValue(textColor), GetGValue(textColor), GetBValue(textColor)));
     StringFormat sf;
     sf.SetAlignment(StringAlignmentCenter);
     sf.SetLineAlignment(StringAlignmentCenter);

@@ -1,6 +1,9 @@
 #include "../include/BatchCoordinator.h"
+#include "../include/FeatureManager.h"
 #include "../include/ModernMsgBox.h"
 #include "../include/Localization.h"
+#include <shellapi.h>
+#include <thread>
 
 namespace {
 
@@ -74,6 +77,18 @@ std::wstring GetDecisionFileName(const std::wstring& operation) {
     wchar_t tempPath[MAX_PATH];
     GetTempPathW(MAX_PATH, tempPath);
     return std::wstring(tempPath) + L"VitraMenu_" + operation + L"_decision.txt";
+}
+
+std::wstring GetWorkerReadyFileName(const std::wstring& operation) {
+    wchar_t tempPath[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+    return std::wstring(tempPath) + L"VitraMenu_" + operation + L"_worker_ready.txt";
+}
+
+std::wstring GetWorkerFailedFileName(const std::wstring& operation) {
+    wchar_t tempPath[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+    return std::wstring(tempPath) + L"VitraMenu_" + operation + L"_worker_failed.txt";
 }
 
 bool IsProcessAlive(DWORD pid) {
@@ -299,6 +314,34 @@ void WriteDecision(const std::wstring& fileName, bool accepted) {
     CloseHandle(hFile);
 }
 
+void TouchFile(const std::wstring& fileName) {
+    HANDLE hFile = CreateFileW(fileName.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+}
+
+bool LaunchElevatedSelf(const wchar_t* parameters) {
+    wchar_t exePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH)) return false;
+
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = L"runas";
+    sei.lpFile = exePath;
+    sei.lpParameters = parameters;
+    sei.nShow = SW_HIDE;
+    return ShellExecuteExW(&sei) != FALSE;
+}
+
+bool StartSuperDeleteWorker() {
+    DeleteFileW(GetWorkerReadyFileName(L"superdelete").c_str());
+    DeleteFileW(GetWorkerFailedFileName(L"superdelete").c_str());
+    if (!LaunchElevatedSelf(L"/superdelete_worker")) {
+        TouchFile(GetWorkerFailedFileName(L"superdelete"));
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 std::wstring BatchCoordinator::GetSharedFileName(const std::wstring& operation) {
@@ -325,8 +368,13 @@ void BatchCoordinator::BeginOperation(const std::wstring& operation) {
     WaitForSingleObject(hMutex, INFINITE);
     std::vector<DWORD> pids = PruneActivePidsLocked(operation);
     if (pids.empty()) {
+        DeleteFileW(GetSharedFileName(operation).c_str());
         DeleteFileW(GetConfirmFileName(operation).c_str());
         DeleteFileW(GetDecisionFileName(operation).c_str());
+        if (operation == L"superdelete") {
+            DeleteFileW(GetWorkerReadyFileName(operation).c_str());
+            DeleteFileW(GetWorkerFailedFileName(operation).c_str());
+        }
     }
     DWORD currentPid = GetCurrentProcessId();
     bool exists = false;
@@ -392,7 +440,8 @@ void BatchCoordinator::RecordResult(const std::wstring& operation, const std::ws
 }
 
 bool BatchCoordinator::ConfirmDestructiveOperation(const std::wstring& operation, const std::wstring& path,
-                                                   const std::wstring& title) {
+                                                   const std::wstring& title, bool* elevatedWorkerStarted) {
+    if (elevatedWorkerStarted) *elevatedWorkerStarted = false;
     std::wstring confirmFile = GetConfirmFileName(operation);
     std::wstring decisionFile = GetDecisionFileName(operation);
 
@@ -413,9 +462,9 @@ bool BatchCoordinator::ConfirmDestructiveOperation(const std::wstring& operation
     if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
         if (!ReadDecision(decisionFile, accepted)) {
             WaitForBatchFileToSettle(confirmFile);
-            Sleep(250);
+            Sleep(operation == L"superdelete" ? 60 : 250);
             WaitForBatchFileToSettle(confirmFile);
-            Sleep(700);
+            Sleep(operation == L"superdelete" ? 120 : 700);
 
             std::vector<std::wstring> paths = ReadPathRecords(confirmFile);
             std::wstring msg;
@@ -438,9 +487,13 @@ bool BatchCoordinator::ConfirmDestructiveOperation(const std::wstring& operation
             if (!paths.empty()) {
                 msg += L"\n\n";
                 for (size_t i = 0; i < paths.size(); ++i) {
-                    size_t pos = paths[i].find_last_of(L"\\/");
-                    std::wstring name = (pos != std::wstring::npos) ? paths[i].substr(pos + 1) : paths[i];
-                    msg += L"  - " + name + L"\n";
+                    if (operation == L"cleanempty") {
+                        msg += L"  - " + paths[i] + L"\n";
+                    } else {
+                        size_t pos = paths[i].find_last_of(L"\\/");
+                        std::wstring name = (pos != std::wstring::npos) ? paths[i].substr(pos + 1) : paths[i];
+                        msg += L"  - " + name + L"\n";
+                    }
                     if (msg.length() > 1600 && i + 1 < paths.size()) {
                         msg += LText(L"  - Additional items omitted from this confirmation.\n",
                                      L"  - \u5176\u4ed6\u9879\u76ee\u5df2\u5728\u6b64\u786e\u8ba4\u4e2d\u7701\u7565\u3002\n");
@@ -449,7 +502,14 @@ bool BatchCoordinator::ConfirmDestructiveOperation(const std::wstring& operation
                 }
             }
 
-            int result = ModernMsgBox::Show(nullptr, msg.c_str(), title.c_str(), MB_YESNO | MB_ICONWARNING);
+            auto afterShow = [&]() {
+                if (operation == L"superdelete") {
+                    if (elevatedWorkerStarted) *elevatedWorkerStarted = true;
+                    StartSuperDeleteWorker();
+                }
+            };
+
+            int result = ModernMsgBox::Show(nullptr, msg.c_str(), title.c_str(), MB_YESNO | MB_ICONWARNING, afterShow);
             accepted = result == IDYES;
             WriteDecision(decisionFile, accepted);
         }
@@ -464,6 +524,71 @@ bool BatchCoordinator::ConfirmDestructiveOperation(const std::wstring& operation
         Sleep(50);
     }
     return false;
+}
+
+bool BatchCoordinator::WaitForSuperDeleteWorkerReadyOrFailed(DWORD timeoutMs, bool& launchFailed) {
+    launchFailed = false;
+    const std::wstring readyFile = GetWorkerReadyFileName(L"superdelete");
+    const std::wstring failedFile = GetWorkerFailedFileName(L"superdelete");
+
+    for (DWORD elapsed = 0; elapsed < timeoutMs; elapsed += 50) {
+        if (GetFileAttributesW(readyFile.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+        if (GetFileAttributesW(failedFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            launchFailed = true;
+            return false;
+        }
+        Sleep(50);
+    }
+    return false;
+}
+
+int BatchCoordinator::RunSuperDeleteWorker() {
+    const std::wstring operation = L"superdelete";
+    const std::wstring decisionFile = GetDecisionFileName(operation);
+    const std::wstring confirmFile = GetConfirmFileName(operation);
+    TouchFile(GetWorkerReadyFileName(operation));
+
+    bool accepted = false;
+    for (DWORD elapsed = 0; elapsed < 10 * 60 * 1000; elapsed += 50) {
+        if (ReadDecision(decisionFile, accepted)) break;
+        Sleep(50);
+    }
+
+    if (!accepted) return 0;
+
+    // The confirmation step has already waited for selected paths to settle.
+    // Do not wait for active caller processes here: the worker is responsible
+    // for producing the result, and a long wait can consume the 30s lifetime
+    // limit before deletion even starts.
+    WaitForBatchFileToSettle(confirmFile);
+    std::vector<std::wstring> paths = ReadPathRecords(confirmFile);
+    if (paths.empty()) {
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Delete failed.\n\nNo selected item paths were received.",
+                                 L"\u5220\u9664\u5931\u8d25\u3002\n\n\u672a\u6536\u5230\u6240\u9009\u9879\u76ee\u8def\u5f84\u3002").c_str(),
+                           LText(L"VitraMenu - Super Delete", L"VitraMenu - \u8d85\u7ea7\u5220\u9664").c_str(),
+                           MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    int successCount = 0;
+    std::vector<std::wstring> failedPaths;
+    std::vector<std::wstring> failedMessages;
+    for (const auto& path : paths) {
+        ModernMsgBox::SetSuppressed(true);
+        std::wstring resultMessage;
+        bool success = FeatureManager::SuperDelete(path, &resultMessage);
+        ModernMsgBox::SetSuppressed(false);
+        RecordResult(operation, path, success, resultMessage);
+        if (success) {
+            ++successCount;
+        } else {
+            failedPaths.push_back(path);
+            failedMessages.push_back(resultMessage);
+        }
+    }
+
+    return failedPaths.empty() ? 0 : 1;
 }
 
 std::vector<BatchCoordinator::Result> BatchCoordinator::ReadAllResults(const std::wstring& operation) {
@@ -517,6 +642,23 @@ std::vector<BatchCoordinator::Result> BatchCoordinator::ReadAllResults(const std
 }
 
 void BatchCoordinator::ShowConsolidatedNotification(const std::wstring& operation, const std::wstring& title) {
+    if (operation == L"superdelete") {
+        const std::wstring resultFile = GetSharedFileName(operation);
+        for (DWORD elapsed = 0; elapsed < 1500; elapsed += 50) {
+            std::vector<Result> pending = ReadAllResults(operation);
+            if (!pending.empty()) break;
+            Sleep(50);
+        }
+        if (ReadAllResults(operation).empty()) {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Delete failed.\n\nNo result was received from the delete worker.",
+                                     L"\u5220\u9664\u5931\u8d25\u3002\n\n\u672a\u6536\u5230\u5220\u9664 worker \u7684\u7ed3\u679c\u3002").c_str(),
+                               title.c_str(),
+                               MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+
     HANDLE hNotifyMutex = nullptr;
     for (int attempt = 0; attempt < 20; ++attempt) {
         hNotifyMutex = CreateMutexW(NULL, FALSE, GetNotifyMutexName(operation).c_str());
