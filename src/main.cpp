@@ -327,14 +327,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
                 BatchCoordinator::BeginOperation(L"cleanempty");
                 const std::wstring cleanEmptyTitle = LText(L"VitraMenu - Clean Empty Folders",
                                                            L"VitraMenu - \u6e05\u7406\u7a7a\u6587\u4ef6\u5939");
-                if (!BatchCoordinator::ConfirmDestructiveOperation(L"cleanempty", target, cleanEmptyTitle)) {
-                    BatchCoordinator::EndOperation(L"cleanempty");
-                    return 0;
-                }
                 std::wstring cleanEmptyMessage;
-                ModernMsgBox::SetSuppressed(true);
                 bool success = FeatureManager::CleanEmptyFolders(target, &cleanEmptyMessage);
-                ModernMsgBox::SetSuppressed(false);
                 BatchCoordinator::RecordResult(L"cleanempty", target, success, cleanEmptyMessage);
                 BatchCoordinator::EndOperation(L"cleanempty");
                 BatchCoordinator::ShowConsolidatedNotification(L"cleanempty", cleanEmptyTitle);

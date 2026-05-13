@@ -612,6 +612,32 @@ void BatchCoordinator::ShowConsolidatedNotification(const std::wstring& operatio
         return;
     }
 
+    if (operation == L"cleanempty") {
+        if (results.empty()) return;
+        std::wstring msg;
+        bool anyFailure = false;
+        for (size_t i = 0; i < results.size(); ++i) {
+            const auto& r = results[i];
+            if (!r.success) anyFailure = true;
+            if (!r.message.empty()) {
+                msg += r.message;
+            } else {
+                msg += r.success
+                    ? LText(L"Clean empty folders completed.", L"清理空文件夹已完成。")
+                    : LText(L"Clean empty folders failed.", L"清理空文件夹失败。");
+            }
+            if (i + 1 < results.size()) msg += L"\n\n";
+            if (msg.length() > 3000 && i + 1 < results.size()) {
+                msg += LText(L"\nAdditional results are omitted from this summary.",
+                             L"\n其他结果已在此摘要中省略。");
+                break;
+            }
+        }
+        ModernMsgBox::Show(nullptr, msg.c_str(), title.c_str(),
+                           MB_OK | (anyFailure ? MB_ICONWARNING : MB_ICONINFORMATION));
+        return;
+    }
+
     int successCount = 0, failCount = 0;
     std::wstring failedFiles;
     for (const auto& r : results) {
@@ -650,10 +676,6 @@ void BatchCoordinator::ShowConsolidatedNotification(const std::wstring& operatio
         msg = (successCount > 0)
             ? LText(L"Some items could not be deleted.\n\n", L"\u90e8\u5206\u9879\u76ee\u5220\u9664\u5931\u8d25\u3002\n\n")
             : LText(L"Delete failed.\n\n", L"\u5220\u9664\u5931\u8d25\u3002\n\n");
-    } else if (operation == L"cleanempty") {
-        msg = (successCount > 0)
-            ? LText(L"Some folders could not be cleaned.\n\n", L"\u90e8\u5206\u6587\u4ef6\u5939\u6e05\u7406\u5931\u8d25\u3002\n\n")
-            : LText(L"Clean empty folders failed.\n\n", L"\u6e05\u7406\u7a7a\u6587\u4ef6\u5939\u5931\u8d25\u3002\n\n");
     } else {
         msg = LText(L"Some items could not be processed.\n\n", L"\u90e8\u5206\u9879\u76ee\u5904\u7406\u5931\u8d25\u3002\n\n");
     }

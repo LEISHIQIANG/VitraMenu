@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cwctype>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -500,6 +501,12 @@ bool ConvertEncodingNativeEquivalent(const std::wstring& filePath, const std::ws
 
 bool FindEmptyFoldersOnePass(const std::wstring& path, std::vector<std::wstring>& emptyFolders,
                              std::vector<std::wstring>& scanFailedFolders, bool& scanOk) {
+    // Clear protected attributes so we can enumerate the folder
+    DWORD dirAttr = GetFileAttributesW(path.c_str());
+    if (dirAttr != INVALID_FILE_ATTRIBUTES &&
+        (dirAttr & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN)))
+        SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+
     WIN32_FIND_DATAW fd;
     std::wstring pattern = path + L"\\*";
     HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
@@ -509,17 +516,20 @@ bool FindEmptyFoldersOnePass(const std::wstring& path, std::vector<std::wstring>
         return true;
     }
 
-    bool hasAnyEntry = false;
+    bool hasRealContent = false;
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        hasAnyEntry = true;
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             std::wstring subPath = path + L"\\" + fd.cFileName;
-            bool childHasAnyEntry = FindEmptyFoldersOnePass(subPath, emptyFolders, scanFailedFolders, scanOk);
-            if (!childHasAnyEntry) {
+            bool childHasRealContent = FindEmptyFoldersOnePass(subPath, emptyFolders, scanFailedFolders, scanOk);
+            if (!childHasRealContent) {
                 emptyFolders.push_back(subPath);
+            } else {
+                hasRealContent = true;
             }
+        } else {
+            hasRealContent = true;
         }
     } while (FindNextFileW(hFind, &fd));
 
@@ -529,7 +539,7 @@ bool FindEmptyFoldersOnePass(const std::wstring& path, std::vector<std::wstring>
         scanOk = false;
         scanFailedFolders.push_back(path);
     }
-    return hasAnyEntry;
+    return hasRealContent;
 }
 
 void BuildExistingFileNameCache(const std::wstring& dir, std::unordered_set<std::wstring>& files) {
@@ -1258,7 +1268,8 @@ bool FeatureManager::CleanEmptyFolders(const std::wstring& folderPath, std::wstr
         std::wstring msg = LText(L"Path is not a valid folder.",
                                  L"\u8def\u5f84\u4e0d\u662f\u6709\u6548\u6587\u4ef6\u5939\u3002");
         if (batchMessage) *batchMessage = msg;
-        ModernMsgBox::Show(nullptr, msg.c_str(), L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!batchMessage && !ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr, msg.c_str(), L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
 
@@ -1285,21 +1296,24 @@ bool FeatureManager::CleanEmptyFolders(const std::wstring& folderPath, std::wstr
                 L"\u90e8\u5206\u6587\u4ef6\u5939\u65e0\u6cd5\u626b\u63cf\u3002\u53d7\u4fdd\u62a4\u6587\u4ef6\u5939\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002\n\n\u5931\u8d25\u6587\u4ef6\u5939\uff1a\n");
             appendFolderList(scanMsg, scanFailedFolders);
             if (batchMessage) *batchMessage = scanMsg;
-            ModernMsgBox::Show(nullptr, scanMsg.c_str(), L"VitraMenu", MB_OK | MB_ICONWARNING);
+            if (!batchMessage && !ModernMsgBox::IsSuppressed())
+                ModernMsgBox::Show(nullptr, scanMsg.c_str(), L"VitraMenu", MB_OK | MB_ICONWARNING);
             LogResult(L"CleanEmpty", folderPath, false, L"Scan incomplete");
             return false;
         }
-        ModernMsgBox::Show(nullptr,
-                           LText(L"No empty folders found.",
-                                 L"\u672a\u627e\u5230\u7a7a\u6587\u4ef6\u5939\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+        if (!batchMessage && !ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr,
+                               LText(L"No empty folders found.",
+                                     L"\u672a\u627e\u5230\u7a7a\u6587\u4ef6\u5939\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONINFORMATION);
         LogResult(L"CleanEmpty", folderPath, true, L"No empty folders");
         return true;
     }
 
     std::wstring msg = LText(L"Found ", L"\u627e\u5230 ") + std::to_wstring(emptyFolders.size()) +
-                       LText(L" empty folder(s).\n\nDelete them?",
-                             L" \u4e2a\u7a7a\u6587\u4ef6\u5939\u3002\n\n\u662f\u5426\u5220\u9664\uff1f");
+                       LText(L" empty folder(s):\n\n", L" \u4e2a\u7a7a\u6587\u4ef6\u5939\uff1a\n\n");
+    appendFolderList(msg, emptyFolders);
+    msg += LText(L"\nDelete them?", L"\n\u662f\u5426\u5220\u9664\uff1f");
     if (!scanOk) {
         msg += LText(L"\n\nSome folders could not be scanned.",
                      L"\n\n\u90e8\u5206\u6587\u4ef6\u5939\u65e0\u6cd5\u626b\u63cf\u3002");
@@ -1320,6 +1334,9 @@ bool FeatureManager::CleanEmptyFolders(const std::wstring& folderPath, std::wstr
     int deleted = 0;
     std::vector<std::wstring> deleteFailedFolders;
     for (const auto& folder : emptyFolders) {
+        DWORD a = GetFileAttributesW(folder.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN)))
+            SetFileAttributesW(folder.c_str(), FILE_ATTRIBUTE_NORMAL);
         if (RemoveDirectoryW(folder.c_str())) {
             deleted++;
         } else {
@@ -1341,9 +1358,10 @@ bool FeatureManager::CleanEmptyFolders(const std::wstring& folderPath, std::wstr
                            L"\n\n\u65e0\u6cd5\u5220\u9664\u7684\u6587\u4ef6\u5939\uff1a\n");
         appendFolderList(resultMsg, deleteFailedFolders);
     }
-    if (batchMessage && !allDeleted) *batchMessage = resultMsg;
-    ModernMsgBox::Show(nullptr, resultMsg.c_str(), L"VitraMenu",
-                       MB_OK | (allDeleted ? MB_ICONINFORMATION : MB_ICONWARNING));
+    if (batchMessage) *batchMessage = resultMsg;
+    if (!batchMessage && !ModernMsgBox::IsSuppressed())
+        ModernMsgBox::Show(nullptr, resultMsg.c_str(), L"VitraMenu",
+                           MB_OK | (allDeleted ? MB_ICONINFORMATION : MB_ICONWARNING));
     LogResult(L"CleanEmpty", folderPath, allDeleted,
               L"Deleted " + std::to_wstring(deleted) +
               L", DeleteFailed=" + std::to_wstring(deleteFailedFolders.size()) +
@@ -2081,19 +2099,21 @@ bool FeatureManager::CopyFileHash(const std::wstring& filePath, const std::wstri
 bool FeatureManager::TakeOwnership(const std::wstring& path) {
     DWORD attr = GetFileAttributesW(path.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES) {
-        ModernMsgBox::Show(nullptr,
-                           LText(L"The path was not found.", L"\u8def\u5f84\u672a\u627e\u5230\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr,
+                               LText(L"The path was not found.", L"\u8def\u5f84\u672a\u627e\u5230\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     const bool isDir = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
     wchar_t fullBuf[MAX_PATH];
     const DWORD gn = GetFullPathNameW(path.c_str(), MAX_PATH, fullBuf, nullptr);
     if (!gn || gn >= MAX_PATH) {
-        ModernMsgBox::Show(nullptr,
-                           LText(L"Could not resolve the full path.",
-                                 L"\u65e0\u6cd5\u89e3\u6790\u5b8c\u6574\u8def\u5f84\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Could not resolve the full path.",
+                                     L"\u65e0\u6cd5\u89e3\u6790\u5b8c\u6574\u8def\u5f84\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     std::wstring full(fullBuf);
@@ -2126,21 +2146,23 @@ bool FeatureManager::TakeOwnership(const std::wstring& path) {
         success = GetExitCodeProcess(sei.hProcess, &exitCode) && exitCode == 0;
         CloseHandle(sei.hProcess);
     }
-    if (!ok) {
-        ModernMsgBox::Show(nullptr,
-                           LText(L"Administrator rights are usually required. The operation was cancelled or failed to start.",
-                                 L"\u901a\u5e38\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002\u64cd\u4f5c\u5df2\u53d6\u6d88\u6216\u542f\u52a8\u5931\u8d25\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONINFORMATION);
-    } else if (!success) {
-        ModernMsgBox::Show(nullptr,
-                           LText(L"Could not take ownership or grant permissions. Try running VitraMenu as Administrator.",
-                                 L"\u65e0\u6cd5\u83b7\u53d6\u6240\u6709\u6743\u6216\u6388\u4e88\u6743\u9650\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONWARNING);
-    } else {
-        ModernMsgBox::Show(nullptr,
-                           LText(L"Ownership and permissions updated successfully.",
-                                 L"\u6240\u6709\u6743\u548c\u6743\u9650\u5df2\u66f4\u65b0\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+    if (!ModernMsgBox::IsSuppressed()) {
+        if (!ok) {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Administrator rights are usually required. The operation was cancelled or failed to start.",
+                                     L"\u901a\u5e38\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002\u64cd\u4f5c\u5df2\u53d6\u6d88\u6216\u542f\u52a8\u5931\u8d25\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+        } else if (!success) {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Could not take ownership or grant permissions. Try running VitraMenu as Administrator.",
+                                     L"\u65e0\u6cd5\u83b7\u53d6\u6240\u6709\u6743\u6216\u6388\u4e88\u6743\u9650\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
+        } else {
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Ownership and permissions updated successfully.",
+                                     L"\u6240\u6709\u6743\u548c\u6743\u9650\u5df2\u66f4\u65b0\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+        }
     }
     LogResult(L"TakeOwnership", full, success);
     return success;
@@ -2149,36 +2171,113 @@ bool FeatureManager::TakeOwnership(const std::wstring& path) {
 bool FeatureManager::ClearReadOnlyAttribute(const std::wstring& path) {
     DWORD attr = GetFileAttributesW(path.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES) {
-        ModernMsgBox::Show(nullptr,
-                           LText(L"The path was not found.", L"\u8def\u5f84\u672a\u627e\u5230\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr,
+                               LText(L"The path was not found.", L"\u8def\u5f84\u672a\u627e\u5230\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     const bool isDir = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
     wchar_t fullBuf[MAX_PATH];
     const DWORD gn = GetFullPathNameW(path.c_str(), MAX_PATH, fullBuf, nullptr);
     if (!gn || gn >= MAX_PATH) {
-        ModernMsgBox::Show(nullptr,
-                           LText(L"Could not resolve the full path.",
-                                 L"\u65e0\u6cd5\u89e3\u6790\u5b8c\u6574\u8def\u5f84\u3002").c_str(),
-                           L"VitraMenu", MB_OK | MB_ICONWARNING);
+        if (!ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr,
+                               LText(L"Could not resolve the full path.",
+                                     L"\u65e0\u6cd5\u89e3\u6790\u5b8c\u6574\u8def\u5f84\u3002").c_str(),
+                               L"VitraMenu", MB_OK | MB_ICONWARNING);
         return false;
     }
     (void)isDir;
     ClearReadOnlyStats stats;
     const bool ok = ClearReadOnlyRecursiveNative(fullBuf, stats);
-    ModernMsgBox::Show(nullptr,
-                       ok ? LText(L"Read-only attributes were cleared (where permitted).",
-                                  L"\u53ea\u8bfb\u5c5e\u6027\u5df2\u6e05\u9664\uff08\u6743\u9650\u5141\u8bb8\u7684\u9879\u76ee\uff09\u3002").c_str()
-                          : LText(L"Some read-only attributes could not be cleared. Try running VitraMenu as Administrator for protected items.",
-                                  L"\u90e8\u5206\u53ea\u8bfb\u5c5e\u6027\u65e0\u6cd5\u6e05\u9664\u3002\u53d7\u4fdd\u62a4\u9879\u76ee\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002").c_str(),
-                       L"VitraMenu", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+    if (!ModernMsgBox::IsSuppressed()) {
+        ModernMsgBox::Show(nullptr,
+                           ok ? LText(L"Read-only attributes were cleared (where permitted).",
+                                      L"\u53ea\u8bfb\u5c5e\u6027\u5df2\u6e05\u9664\uff08\u6743\u9650\u5141\u8bb8\u7684\u9879\u76ee\uff09\u3002").c_str()
+                              : LText(L"Some read-only attributes could not be cleared. Try running VitraMenu as Administrator for protected items.",
+                                      L"\u90e8\u5206\u53ea\u8bfb\u5c5e\u6027\u65e0\u6cd5\u6e05\u9664\u3002\u53d7\u4fdd\u62a4\u9879\u76ee\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c VitraMenu\u3002").c_str(),
+                           L"VitraMenu", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
+    }
     LogResult(L"ClearReadOnly", path, ok,
               L"Visited=" + std::to_wstring(stats.visited) +
               L", Changed=" + std::to_wstring(stats.changed) +
               L", Failed=" + std::to_wstring(stats.failed) +
               L", LastError=" + std::to_wstring(stats.lastError));
     return ok;
+}
+
+// Phase 1: enumerate tree, delete files in parallel, collect dirs in bottom-up order.
+static void CollectAndDeleteFiles(const std::wstring& path,
+                                  std::vector<std::wstring>& dirs,
+                                  std::mutex& dirsMtx,
+                                  std::vector<std::function<void()>>& fileTasks,
+                                  std::mutex& tasksMtx) {
+    std::wstring lp = (path.rfind(L"\\\\?\\", 0) == 0) ? path : L"\\\\?\\" + path;
+    DWORD attr = GetFileAttributesW(lp.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) return;
+    if (attr & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN))
+        SetFileAttributesW(lp.c_str(), FILE_ATTRIBUTE_NORMAL);
+    if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        std::lock_guard<std::mutex> lk(tasksMtx);
+        fileTasks.push_back([lp] {
+            if (!DeleteFileW(lp.c_str())) {
+                // Retry: re-clear attrs in case another process restored them
+                SetFileAttributesW(lp.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(lp.c_str());
+            }
+        });
+        return;
+    }
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW((lp + L"\\*").c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            std::wstring child = path + L"\\" + fd.cFileName;
+            CollectAndDeleteFiles(child, dirs, dirsMtx, fileTasks, tasksMtx);
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+    // Post-order: push dir after children so dirs vector is bottom-up
+    std::lock_guard<std::mutex> lk(dirsMtx);
+    dirs.push_back(lp);
+}
+
+static void SuperDeleteParallel(const std::wstring& path) {
+    std::vector<std::wstring> dirs;
+    std::vector<std::function<void()>> fileTasks;
+    std::mutex dirsMtx, tasksMtx;
+
+    // Single-threaded tree walk to collect all file tasks and dirs in bottom-up order
+    CollectAndDeleteFiles(path, dirs, dirsMtx, fileTasks, tasksMtx);
+
+    // Delete all files in parallel using a thread pool
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    int nThreads = max(2, (int)si.dwNumberOfProcessors);
+    std::atomic<int> idx{0};
+    int total = (int)fileTasks.size();
+    {
+        std::vector<std::thread> workers;
+        workers.reserve(nThreads);
+        for (int i = 0; i < nThreads; ++i) {
+            workers.emplace_back([&] {
+                for (int j = idx.fetch_add(1, std::memory_order_relaxed); j < total;
+                     j = idx.fetch_add(1, std::memory_order_relaxed))
+                    fileTasks[j]();
+            });
+        }
+        for (auto& w : workers) w.join();
+    }
+
+    // Remove dirs bottom-up; re-clear attrs in case they weren't cleared during traversal
+    for (const auto& d : dirs) {
+        DWORD a = GetFileAttributesW(d.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES &&
+            (a & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN)))
+            SetFileAttributesW(d.c_str(), FILE_ATTRIBUTE_NORMAL);
+        RemoveDirectoryW(d.c_str());
+    }
 }
 
 bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
@@ -2189,7 +2288,8 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
 
     DWORD attr = GetFileAttributesW(normalizedPath.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES) {
-        ModernMsgBox::Show(nullptr, T(Msg::PathNotFound), T(Msg::Title), MB_OK | MB_ICONWARNING);
+        if (!ModernMsgBox::IsSuppressed())
+            ModernMsgBox::Show(nullptr, T(Msg::PathNotFound), T(Msg::Title), MB_OK | MB_ICONWARNING);
         return false;
     }
 
@@ -2205,52 +2305,63 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath) {
             return false;
         }
     }
-    // Find Git Bash from trusted Git for Windows install locations only.
+
+    auto pathGone = [&]() {
+        return GetFileAttributesW(normalizedPath.c_str()) == INVALID_FILE_ATTRIBUTES;
+    };
+
+    // Build Git Bash command upfront so we can launch it in parallel with Win32
     std::wstring bashPath = FindTrustedGitBashPath();
-
-    if (bashPath.empty()) {
-        ModernMsgBox::Show(nullptr, T(Msg::GitBashNotFound), T(Msg::Title), MB_OK | MB_ICONWARNING);
-        return false;
+    std::wstring bashCmd;
+    if (!bashPath.empty()) {
+        std::wstring unixPath = targetPath;
+        for (auto& c : unixPath) if (c == L'\\') c = L'/';
+        if (unixPath.size() >= 2 && unixPath[1] == L':') {
+            wchar_t drive = towlower(unixPath[0]);
+            unixPath = L"/" + std::wstring(1, drive) + unixPath.substr(2);
+        }
+        std::wstring rmScript = L"exec /usr/bin/rm -" + std::wstring(isDir ? L"rf " : L"f ") +
+                                L"-- " + ShellSingleQuoteForBash(unixPath);
+        bashCmd = L"\"" + bashPath + L"\" --noprofile --norc -c \"" + rmScript + L"\"";
     }
 
-    // Convert to Unix path
-    std::wstring unixPath = targetPath;
-    for (auto& c : unixPath) if (c == L'\\') c = L'/';
-    if (unixPath.size() >= 2 && unixPath[1] == L':') {
-        wchar_t drive = towlower(unixPath[0]);
-        unixPath = L"/" + std::wstring(1, drive) + unixPath.substr(2);
+    // Launch Git Bash in parallel with Win32 native delete for maximum speed.
+    // Git Bash handles special filenames (nul, no-extension) that Win32 cannot delete.
+    HANDLE hBash = INVALID_HANDLE_VALUE;
+    if (!bashCmd.empty()) {
+        STARTUPINFOW bsi = { sizeof(bsi) };
+        PROCESS_INFORMATION bpi = {};
+        bsi.dwFlags = STARTF_USESHOWWINDOW;
+        bsi.wShowWindow = SW_HIDE;
+        wchar_t* buf = _wcsdup(bashCmd.c_str());
+        if (CreateProcessW(bashPath.c_str(), buf, nullptr, nullptr, FALSE,
+                           CREATE_NO_WINDOW, nullptr, nullptr, &bsi, &bpi)) {
+            hBash = bpi.hProcess;
+            CloseHandle(bpi.hThread);
+        }
+        free(buf);
     }
 
-    // Direct call to Git Bash, then exec rm so bash does not stay as an extra process.
-    std::wstring rmScript = L"exec /usr/bin/rm -" + std::wstring(isDir ? L"rf " : L"f ") +
-                            L"-- " + ShellSingleQuoteForBash(unixPath);
-    std::wstring cmd = L"\"" + bashPath + L"\" --noprofile --norc -c \"" + rmScript + L"\"";
+    // Win32 native parallel delete runs concurrently with Git Bash
+    std::thread win32Thread([&] { SuperDeleteParallel(targetPath); });
 
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi = {};
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    wchar_t* cmdCopy = _wcsdup(cmd.c_str());
-    bool ok = CreateProcessW(bashPath.c_str(), cmdCopy, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    free(cmdCopy);
-
-    DWORD exitCode = 1;
-    if (ok) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
+    // Wait for both; Git Bash capped at 5s (only needed for special filenames like nul)
+    win32Thread.join();
+    if (hBash != INVALID_HANDLE_VALUE) {
+        WaitForSingleObject(hBash, 5000);
+        TerminateProcess(hBash, 1);
+        CloseHandle(hBash);
     }
 
-    attr = GetFileAttributesW(normalizedPath.c_str());
-    bool deleted = ok && exitCode == 0 && (attr == INVALID_FILE_ATTRIBUTES);
+    bool deleted = pathGone();
 
-    if (deleted) {
-        ModernMsgBox::Show(nullptr, T(Msg::DeleteSuccess), T(Msg::Title), MB_OK | MB_ICONINFORMATION);
-    } else {
-        std::wstring errMsg = T(Msg::DeleteFailed) + targetPath;
-        ModernMsgBox::Show(nullptr, errMsg.c_str(), T(Msg::Title), MB_OK | MB_ICONWARNING);
+    if (!ModernMsgBox::IsSuppressed()) {
+        if (deleted) {
+            ModernMsgBox::Show(nullptr, T(Msg::DeleteSuccess), T(Msg::Title), MB_OK | MB_ICONINFORMATION);
+        } else {
+            std::wstring errMsg = T(Msg::DeleteFailed) + targetPath;
+            ModernMsgBox::Show(nullptr, errMsg.c_str(), T(Msg::Title), MB_OK | MB_ICONWARNING);
+        }
     }
 
     LogResult(L"SuperDelete", targetPath, deleted);
