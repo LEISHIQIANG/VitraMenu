@@ -4,9 +4,9 @@
  * Optimized: native Win32 logging, COM-based shortcut creation, no C++ streams
  */
 
-#include "../include/FeatureManager.h"
-#include "../include/ModernMsgBox.h"
-#include "../include/Localization.h"
+#include "core/FeatureManager.h"
+#include "ui/ModernMsgBox.h"
+#include "core/Localization.h"
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shellapi.h>
@@ -1140,8 +1140,12 @@ bool FeatureManager::CopyFilePath(const std::wstring& filePath) {
 
 bool FeatureManager::QuickRename(const std::wstring& targetPath, int mode) {
     SYSTEMTIME st; GetLocalTime(&st);
-    wchar_t dateStr[32];
-    swprintf_s(dateStr, L"%04d_%02d_%02d", st.wYear, st.wMonth, st.wDay);
+    std::wstring dateStr;
+    std::wstring format = GetQuickRenameDateFormat();
+    if (!TryFormatDateFolderName(st, format, dateStr)) {
+        dateStr = L"YYYY_MM_DD";
+        TryFormatDateFolderName(st, L"YYYY_MM_DD", dateStr);
+    }
 
     bool isDir = DirExists(targetPath);
     std::wstring dir = targetPath.substr(0, targetPath.find_last_of(L"\\/"));
@@ -1157,7 +1161,7 @@ bool FeatureManager::QuickRename(const std::wstring& targetPath, int mode) {
     }
 
     auto buildName = [&](int suffix) -> std::wstring {
-        std::wstring stem = (mode == 1) ? (std::wstring(dateStr) + L"_" + baseName) : (baseName + L"_" + dateStr);
+        std::wstring stem = (mode == 1) ? (dateStr + L"_" + baseName) : (baseName + L"_" + dateStr);
         if (suffix > 1) stem += L"(" + std::to_wstring(suffix) + L")";
         return dir + L"\\" + stem + ext;
     };
@@ -1177,12 +1181,114 @@ bool FeatureManager::QuickRename(const std::wstring& targetPath, int mode) {
 
 bool FeatureManager::CreateDateFolder(const std::wstring& folderPath) {
     SYSTEMTIME st; GetLocalTime(&st);
-    wchar_t folderName[32];
-    swprintf_s(folderName, L"%04d_%02d_%02d", st.wYear, st.wMonth, st.wDay);
+    std::wstring folderName;
+    std::wstring format = GetDateFolderFormat();
+    if (!TryFormatDateFolderName(st, format, folderName)) {
+        folderName = L"YYYY_MM_DD";
+        TryFormatDateFolderName(st, L"YYYY_MM_DD", folderName);
+    }
     std::wstring newFolder = folderPath + L"\\" + folderName;
     bool ok = CreateDirectoryW(newFolder.c_str(), NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
     LogResult(L"CreateFolder", newFolder, ok);
     return ok;
+}
+
+std::wstring FeatureManager::GetQuickRenameDateFormat() {
+    std::wstring iniPath = GetExeDir() + L"\\VitraMenu.ini";
+    wchar_t buf[128] = {};
+    GetPrivateProfileStringW(L"Settings", L"QuickRenameDateFormat", L"YYYY_MM_DD", buf, 128, iniPath.c_str());
+    return buf;
+}
+
+std::wstring FeatureManager::GetDateFolderFormat() {
+    std::wstring iniPath = GetExeDir() + L"\\VitraMenu.ini";
+    wchar_t buf[128] = {};
+    GetPrivateProfileStringW(L"Settings", L"DateFolderFormat", L"YYYY_MM_DD", buf, 128, iniPath.c_str());
+    return buf;
+}
+
+bool FeatureManager::SetQuickRenameDateFormat(const std::wstring& format) {
+    std::wstring iniPath = GetExeDir() + L"\\VitraMenu.ini";
+    return WritePrivateProfileStringW(L"Settings", L"QuickRenameDateFormat", format.c_str(), iniPath.c_str()) != FALSE;
+}
+
+bool FeatureManager::SetDateFolderFormat(const std::wstring& format) {
+    std::wstring iniPath = GetExeDir() + L"\\VitraMenu.ini";
+    return WritePrivateProfileStringW(L"Settings", L"DateFolderFormat", format.c_str(), iniPath.c_str()) != FALSE;
+}
+
+bool FeatureManager::TryFormatDateFolderName(const SYSTEMTIME& st, const std::wstring& format, std::wstring& out) {
+    if (format.empty()) return false;
+    if (format.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) return false;
+    
+    std::wstring result = format;
+    wchar_t yyyyStr[8] = {}; swprintf_s(yyyyStr, L"%04d", st.wYear);
+    size_t pos = result.find(L"YYYY");
+    while (pos != std::wstring::npos) { result.replace(pos, 4, yyyyStr); pos = result.find(L"YYYY", pos + 4); }
+    pos = result.find(L"yyyy");
+    while (pos != std::wstring::npos) { result.replace(pos, 4, yyyyStr); pos = result.find(L"yyyy", pos + 4); }
+    
+    wchar_t yyStr[4] = {}; swprintf_s(yyStr, L"%02d", st.wYear % 100);
+    pos = result.find(L"YY");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, yyStr); pos = result.find(L"YY", pos + 2); }
+    pos = result.find(L"yy");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, yyStr); pos = result.find(L"yy", pos + 2); }
+    
+    wchar_t mmStr[4] = {}; swprintf_s(mmStr, L"%02d", st.wMonth);
+    pos = result.find(L"MM");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, mmStr); pos = result.find(L"MM", pos + 2); }
+    
+    wchar_t mStr[4] = {}; swprintf_s(mStr, L"%d", st.wMonth);
+    pos = result.find(L"M");
+    while (pos != std::wstring::npos) {
+        if (pos > 0 && result[pos - 1] == L'M') { pos = result.find(L"M", pos + 1); continue; }
+        if (pos + 1 < result.size() && result[pos + 1] == L'M') { pos = result.find(L"M", pos + 2); continue; }
+        result.replace(pos, 1, mStr);
+        pos = result.find(L"M", pos + 1);
+    }
+    
+    wchar_t ddStr[4] = {}; swprintf_s(ddStr, L"%02d", st.wDay);
+    pos = result.find(L"DD");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, ddStr); pos = result.find(L"DD", pos + 2); }
+    pos = result.find(L"dd");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, ddStr); pos = result.find(L"dd", pos + 2); }
+    
+    wchar_t dStr[4] = {}; swprintf_s(dStr, L"%d", st.wDay);
+    pos = result.find(L"D");
+    while (pos != std::wstring::npos) {
+        if (pos > 0 && result[pos - 1] == L'D') { pos = result.find(L"D", pos + 1); continue; }
+        if (pos + 1 < result.size() && result[pos + 1] == L'D') { pos = result.find(L"D", pos + 2); continue; }
+        result.replace(pos, 1, dStr);
+        pos = result.find(L"D", pos + 1);
+    }
+    pos = result.find(L"d");
+    while (pos != std::wstring::npos) {
+        if (pos > 0 && result[pos - 1] == L'd') { pos = result.find(L"d", pos + 1); continue; }
+        if (pos + 1 < result.size() && result[pos + 1] == L'd') { pos = result.find(L"d", pos + 2); continue; }
+        result.replace(pos, 1, dStr);
+        pos = result.find(L"d", pos + 1);
+    }
+    
+    wchar_t hhStr[4] = {}; swprintf_s(hhStr, L"%02d", st.wHour);
+    pos = result.find(L"HH");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, hhStr); pos = result.find(L"HH", pos + 2); }
+    pos = result.find(L"hh");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, hhStr); pos = result.find(L"hh", pos + 2); }
+    
+    wchar_t minStr[4] = {}; swprintf_s(minStr, L"%02d", st.wMinute);
+    pos = result.find(L"mm");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, minStr); pos = result.find(L"mm", pos + 2); }
+    
+    wchar_t ssStr[4] = {}; swprintf_s(ssStr, L"%02d", st.wSecond);
+    pos = result.find(L"ss");
+    while (pos != std::wstring::npos) { result.replace(pos, 2, ssStr); pos = result.find(L"ss", pos + 2); }
+    
+    if (result.empty() || result.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
+        return false;
+    }
+    
+    out = result;
+    return true;
 }
 
 bool FeatureManager::ExtractStructure(const std::wstring& folderPath, bool inCurrentDir) {

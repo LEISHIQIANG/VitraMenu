@@ -40,6 +40,13 @@ public:
     static bool TakeOwnership(const std::wstring& path);
     static bool ClearReadOnlyAttribute(const std::wstring& path);
 
+    // -- Date Settings --
+    static std::wstring GetQuickRenameDateFormat();
+    static std::wstring GetDateFolderFormat();
+    static bool SetQuickRenameDateFormat(const std::wstring& format);
+    static bool SetDateFolderFormat(const std::wstring& format);
+    static bool TryFormatDateFolderName(const SYSTEMTIME& st, const std::wstring& format, std::wstring& out);
+
     // -- Utilities --
     static std::wstring GetExeDir();
     static bool FileExists(const std::wstring& path);

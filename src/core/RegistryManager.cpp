@@ -3,7 +3,7 @@
  * Encapsulates all Registry operations
  */
 
-#include "../include/RegistryManager.h"
+#include "core/RegistryManager.h"
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
 

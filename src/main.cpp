@@ -3,12 +3,12 @@
  * Robust command line entry point for VitraMenu
  */
 
-#include "../include/UIManager.h"
-#include "../include/FeatureManager.h"
-#include "../include/ModernMsgBox.h"
-#include "../include/BatchCoordinator.h"
-#include "../include/Localization.h"
-#include "../include/ThemeIconManager.h"
+#include "ui/UIManager.h"
+#include "core/FeatureManager.h"
+#include "ui/ModernMsgBox.h"
+#include "core/BatchCoordinator.h"
+#include "core/Localization.h"
+#include "ui/ThemeIconManager.h"
 #include <shellapi.h>
 #include <string>
 #include <vector>

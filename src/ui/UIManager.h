@@ -7,7 +7,10 @@
 #include <vector>
 #include <string>
 #include <map>
-#include "RegistryManager.h"
+#include "core/RegistryManager.h"
+#include <memory>
+
+class ShadowWindow;
 
 // -------------------- Data Structures --------------------
 
@@ -29,6 +32,7 @@ struct MenuItemUI {
     std::wstring appliesTo;                   // AppliesTo registry filter, e.g. ".exe OR .lnk"
     std::wstring multiSelectModel;            // Explorer MultiSelectModel value, e.g. "Single"
     int resId               = 0;
+    bool configurable       = false;
 
     // UI state
     bool checked            = false;
@@ -99,6 +103,10 @@ private:
 
     // Status text
     std::wstring m_statusText;
+    std::wstring m_dateFolderFormat;
+    std::wstring m_quickRenameDateFormat;
+    bool m_hasPendingCardClick;
+    size_t m_pendingCardClickIndex;
 
     // Direct2D / DirectWrite / WIC
     Microsoft::WRL::ComPtr<ID2D1Factory> m_d2dFactory;
@@ -113,6 +121,7 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> m_labelFormat;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> m_titleIconBitmap;
     std::map<int, Microsoft::WRL::ComPtr<ID2D1Bitmap>> m_iconBitmaps;
+    std::unique_ptr<ShadowWindow> m_shadowWindow;
 
     // Internal methods
     void BuildMenuItems();
@@ -144,14 +153,17 @@ private:
     void DrawCardD2D(const MenuItemUI& item, int W, int index);
     void OnMouseMove(int x, int y);
     void OnLButtonDown(int x, int y);
+    void OnLButtonDblClk(int x, int y);
     void OnMouseWheel(int delta, int x, int y);
     void OnMouseLeave();
-
+    void CancelPendingCardClick();
+    void CommitPendingCardClick();
+    void ShowItemSettings(MenuItemUI& item);
+    bool ShowDateFormatSettingsDialog(const std::wstring& itemKey);
     void DoInstall();
     void DoReinstall();
     void DoUninstall();
     void ApplySingleItem(MenuItemUI& target, bool install);
     bool WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring& exe, bool countResults, int& count, int& fail);
-
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 };

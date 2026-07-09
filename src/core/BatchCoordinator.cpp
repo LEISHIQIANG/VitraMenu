@@ -1,7 +1,7 @@
-#include "../include/BatchCoordinator.h"
-#include "../include/FeatureManager.h"
-#include "../include/ModernMsgBox.h"
-#include "../include/Localization.h"
+#include "core/BatchCoordinator.h"
+#include "core/FeatureManager.h"
+#include "ui/ModernMsgBox.h"
+#include "core/Localization.h"
 #include <shellapi.h>
 #include <thread>
 

@@ -1,6 +1,6 @@
-#include "../include/ModernMsgBox.h"
-#include "../include/ModernUI.h"
-#include "../include/Localization.h"
+#include "ui/ModernMsgBox.h"
+#include "ui/ModernUI.h"
+#include "core/Localization.h"
 
 bool ModernMsgBox::s_suppressed = false;
 volatile LONG ModernMsgBox::s_activeDialogs = 0;

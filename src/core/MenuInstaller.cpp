@@ -3,9 +3,9 @@
  * Batch installer for VitraMenu context items
  */
 
-#include "../include/MenuInstaller.h"
-#include "../include/ThemeIconManager.h"
-#include "../resource.h"
+#include "core/MenuInstaller.h"
+#include "ui/ThemeIconManager.h"
+#include "resources/resource.h"
 #include <vector>
 
 std::vector<MenuItem> MenuInstaller::GetMenuItems(const std::wstring& rawPath) {

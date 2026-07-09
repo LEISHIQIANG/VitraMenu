@@ -1,6 +1,6 @@
-#include "../include/ThemeIconManager.h"
-#include "../include/RegistryManager.h"
-#include "../resource.h"
+#include "ui/ThemeIconManager.h"
+#include "core/RegistryManager.h"
+#include "resources/resource.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <vector>

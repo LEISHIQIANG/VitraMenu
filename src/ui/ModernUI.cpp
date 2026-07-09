@@ -4,7 +4,7 @@
  * Optimized: cached fonts, reused objects, minimal allocations per frame
  */
 
-#include "../include/ModernUI.h"
+#include "ui/ModernUI.h"
 #include <dwmapi.h>
 #include <gdiplus.h>
 

@@ -41,7 +41,7 @@
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>src;src\resources;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -69,7 +69,7 @@
       <ExceptionHandling>Sync</ExceptionHandling>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <ControlFlowGuard>false</ControlFlowGuard>
-      <AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>src;src\resources;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 /Gw %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -85,27 +85,30 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\UIManager.cpp" />
-    <ClCompile Include="src\RegistryManager.cpp" />
-    <ClCompile Include="src\FeatureManager.cpp" />
-    <ClCompile Include="src\MenuInstaller.cpp" />
-    <ClCompile Include="src\ModernUI.cpp" />
-    <ClCompile Include="src\ModernMsgBox.cpp" />
-    <ClCompile Include="src\BatchCoordinator.cpp" />
-    <ClCompile Include="src\ThemeIconManager.cpp" />
+    <ClCompile Include="src\core\BatchCoordinator.cpp" />
+    <ClCompile Include="src\core\FeatureManager.cpp" />
+    <ClCompile Include="src\core\MenuInstaller.cpp" />
+    <ClCompile Include="src\core\RegistryManager.cpp" />
+    <ClCompile Include="src\ui\ModernMsgBox.cpp" />
+    <ClCompile Include="src\ui\ModernUI.cpp" />
+    <ClCompile Include="src\ui\ShadowWindow.cpp" />
+    <ClCompile Include="src\ui\ThemeIconManager.cpp" />
+    <ClCompile Include="src\ui\UIManager.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\UIManager.h" />
-    <ClInclude Include="include\RegistryManager.h" />
-    <ClInclude Include="include\FeatureManager.h" />
-    <ClInclude Include="include\MenuInstaller.h" />
-    <ClInclude Include="include\ModernUI.h" />
-    <ClInclude Include="include\ModernMsgBox.h" />
-    <ClInclude Include="include\BatchCoordinator.h" />
-    <ClInclude Include="include\ThemeIconManager.h" />
+    <ClInclude Include="src\core\BatchCoordinator.h" />
+    <ClInclude Include="src\core\FeatureManager.h" />
+    <ClInclude Include="src\core\Localization.h" />
+    <ClInclude Include="src\core\MenuInstaller.h" />
+    <ClInclude Include="src\core\RegistryManager.h" />
+    <ClInclude Include="src\ui\ModernMsgBox.h" />
+    <ClInclude Include="src\ui\ModernUI.h" />
+    <ClInclude Include="src\ui\ShadowWindow.h" />
+    <ClInclude Include="src\ui\ThemeIconManager.h" />
+    <ClInclude Include="src\ui\UIManager.h" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="VitraMenu.rc" />
+    <ResourceCompile Include="src\resources\VitraMenu.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

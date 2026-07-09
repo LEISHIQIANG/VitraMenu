@@ -1,5 +1,5 @@
 #pragma once
-#include "RegistryManager.h"
+#include "core/RegistryManager.h"
 #include <vector>
 #include <string>
 
