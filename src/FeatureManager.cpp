@@ -1607,6 +1607,26 @@ bool FeatureManager::OpenCodex(const std::wstring& folderPath) {
     return ok;
 }
 
+bool FeatureManager::OpenOpenCode(const std::wstring& folderPath) {
+    std::wstring workDir = folderPath.empty() ? GetExeDir() : folderPath;
+
+    std::wstring params = L"/k opencode";
+
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = NULL;
+    std::wstring cmdExe = GetSystemExecutable(L"cmd.exe");
+    sei.lpFile = cmdExe.c_str();
+    sei.lpParameters = params.c_str();
+    sei.lpDirectory = workDir.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+
+    bool ok = ShellExecuteExW(&sei) != FALSE;
+    if (sei.hProcess) CloseHandle(sei.hProcess);
+    LogResult(L"OpenOpenCode", workDir, ok);
+    return ok;
+}
+
 bool FeatureManager::RestartExplorer() {
     std::wstring killCmd = QuoteForCommandLine(GetSystemExecutable(L"taskkill.exe")) + L" /F /IM explorer.exe";
     bool killed = ExecuteCommand(killCmd, true);
@@ -1651,17 +1671,33 @@ bool FeatureManager::OpenRegistryEditor() {
 bool FeatureManager::OpenHosts() {
     std::wstring hostsDir = L"C:\\Windows\\System32\\drivers\\etc";
     std::wstring hostsFile = hostsDir + L"\\hosts";
-    
+
+    if (!FileExists(hostsFile)) {
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Hosts file not found.",
+                                 L"\u672a\u627e\u5230 Hosts \u6587\u4ef6\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONWARNING);
+        LogResult(L"OpenHosts", hostsFile, false, L"Hosts file not found");
+        return false;
+    }
+
     ShellExecuteW(NULL, L"explore", hostsDir.c_str(), NULL, NULL, SW_SHOWNORMAL);
 
     std::wstring notepad = GetSystemExecutable(L"notepad.exe");
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
-    sei.lpVerb = nullptr;
+    sei.lpVerb = L"runas";
     sei.lpFile = notepad.c_str();
     sei.lpParameters = hostsFile.c_str();
     sei.nShow = SW_SHOWNORMAL;
     bool ok = ShellExecuteExW(&sei) != FALSE;
-    
+
+    if (!ok) {
+        ModernMsgBox::Show(nullptr,
+                           LText(L"Administrator approval is required to edit the hosts file.",
+                                 L"\u7f16\u8f91 hosts \u6587\u4ef6\u9700\u8981\u7ba1\u7406\u5458\u6388\u6743\u3002").c_str(),
+                           L"VitraMenu", MB_OK | MB_ICONINFORMATION);
+    }
+
     LogResult(L"OpenHosts", hostsFile, ok);
     return ok;
 }
@@ -2468,15 +2504,11 @@ bool FeatureManager::SuperDelete(const std::wstring& targetPath, std::wstring* r
     std::wstring bashPath = FindTrustedGitBashPath();
     std::wstring bashCmd;
     if (!bashPath.empty()) {
-        std::wstring unixPath = targetPath;
-        for (auto& c : unixPath) if (c == L'\\') c = L'/';
-        if (unixPath.size() >= 2 && unixPath[1] == L':') {
-            wchar_t drive = towlower(unixPath[0]);
-            unixPath = L"/" + std::wstring(1, drive) + unixPath.substr(2);
-        }
-        std::wstring rmScript = L"exec /usr/bin/rm -" + std::wstring(isDir ? L"rf " : L"f ") +
-                                L"-- " + ShellSingleQuoteForBash(unixPath);
-        bashCmd = L"\"" + bashPath + L"\" --noprofile --norc -c \"" + rmScript + L"\"";
+        std::wstring rmScript = std::wstring(L"target=$(/usr/bin/cygpath -u \"$1\" 2>/dev/null || printf '%s' \"$1\"); ") +
+                                L"/usr/bin/chmod -R u+w -- \"$target\" 2>/dev/null || true; " +
+                                L"exec /usr/bin/rm -" + std::wstring(isDir ? L"rf " : L"f ") +
+                                L"-- \"$target\"";
+        bashCmd = L"\"" + bashPath + L"\" --noprofile --norc -c \"" + rmScript + L"\" -- " + ShellSingleQuoteForBash(targetPath);
     }
 
     // Launch Git Bash in parallel with Win32 native delete for maximum speed.

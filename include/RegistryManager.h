@@ -43,6 +43,15 @@ public:
     static bool IsMenuItemInstalled(const std::wstring& itemName,
                                     Scope scope = Files);
 
+    static bool SetContextMenuIcon(const std::wstring& itemName,
+                                   Scope scope,
+                                   const std::wstring& icon);
+
+    static bool SetSubMenuIcon(const std::wstring& parentName,
+                               const std::wstring& subName,
+                               Scope scope,
+                               const std::wstring& icon);
+
 private:
     static std::wstring GetBaseRegistryPath(Scope scope);
     static bool WriteStringValue(HKEY hKey, const wchar_t* name, const std::wstring& value);

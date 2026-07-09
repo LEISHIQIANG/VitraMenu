@@ -17,6 +17,7 @@ struct SubMenuItemUI {
     std::wstring keyName;     // Internal key
     std::wstring command;     // Command parameter e.g. "/rename 1"
     std::wstring icon;        // shell32.dll icon e.g. "shell32.dll,265"
+    int resId = 0;
 };
 
 struct MenuItemUI {

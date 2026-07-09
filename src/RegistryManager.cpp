@@ -16,6 +16,24 @@ static void LogReg(const std::wstring& msg) {
 #endif
 }
 
+static std::wstring ToPerUserClassesPath(const std::wstring& classesRelativePath) {
+    return L"Software\\Classes\\" + classesRelativePath;
+}
+
+static bool SetExistingStringValue(HKEY root, const std::wstring& keyPath,
+                                   const wchar_t* name, const std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, keyPath.c_str(), 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+    const DWORD bytes = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+    const bool ok = RegSetValueExW(key, name, 0, REG_SZ,
+                                   reinterpret_cast<const BYTE*>(value.c_str()),
+                                   bytes) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return ok;
+}
+
 // --- Private Utilities ---
 
 std::wstring RegistryManager::GetBaseRegistryPath(Scope scope) {
@@ -275,4 +293,48 @@ bool RegistryManager::IsMenuItemInstalled(const std::wstring& itemName,
         return true;
     }
     return false;
+}
+
+bool RegistryManager::SetContextMenuIcon(const std::wstring& itemName,
+                                         Scope scope,
+                                         const std::wstring& icon) {
+    if (scope == BothFileFolder) {
+        const bool files = SetContextMenuIcon(itemName, Files, icon);
+        const bool directory = SetContextMenuIcon(itemName, Directory, icon);
+        return files || directory;
+    }
+    if (scope == DirAndBackground) {
+        const bool directory = SetContextMenuIcon(itemName, Directory, icon);
+        const bool background = SetContextMenuIcon(itemName, Background, icon);
+        return directory || background;
+    }
+
+    const std::wstring relativePath = GetBaseRegistryPath(scope) + L"\\" + itemName;
+    const bool perUser = SetExistingStringValue(
+        HKEY_CURRENT_USER, ToPerUserClassesPath(relativePath), L"Icon", icon);
+    const bool legacy = SetExistingStringValue(HKEY_CLASSES_ROOT, relativePath, L"Icon", icon);
+    return perUser || legacy;
+}
+
+bool RegistryManager::SetSubMenuIcon(const std::wstring& parentName,
+                                     const std::wstring& subName,
+                                     Scope scope,
+                                     const std::wstring& icon) {
+    if (scope == BothFileFolder) {
+        const bool files = SetSubMenuIcon(parentName, subName, Files, icon);
+        const bool directory = SetSubMenuIcon(parentName, subName, Directory, icon);
+        return files || directory;
+    }
+    if (scope == DirAndBackground) {
+        const bool directory = SetSubMenuIcon(parentName, subName, Directory, icon);
+        const bool background = SetSubMenuIcon(parentName, subName, Background, icon);
+        return directory || background;
+    }
+
+    const std::wstring relativePath =
+        GetBaseRegistryPath(scope) + L"\\" + parentName + L"\\shell\\" + subName;
+    const bool perUser = SetExistingStringValue(
+        HKEY_CURRENT_USER, ToPerUserClassesPath(relativePath), L"Icon", icon);
+    const bool legacy = SetExistingStringValue(HKEY_CLASSES_ROOT, relativePath, L"Icon", icon);
+    return perUser || legacy;
 }

@@ -8,14 +8,85 @@
 #include "../include/ModernMsgBox.h"
 #include "../include/BatchCoordinator.h"
 #include "../include/Localization.h"
+#include "../include/ThemeIconManager.h"
 #include <shellapi.h>
 #include <string>
 #include <vector>
 
 namespace {
 
-DWORD WINAPI ProcessLifetimeLimitThread(LPVOID) {
-    for (DWORD elapsed = 0; elapsed < 30000; elapsed += 250) {
+static const DWORD DEFAULT_PROCESS_LIFETIME_MS = 5 * 60 * 1000;
+static const DWORD LONG_PROCESS_LIFETIME_MS = 30 * 60 * 1000;
+static const DWORD SUPERDELETE_PROCESS_LIFETIME_MS = 10 * 60 * 1000;
+
+bool IsKnownCommandFlag(const std::wstring& flag) {
+    return flag == L"/copypath" ||
+           flag == L"/rename" ||
+           flag == L"/createfolder" ||
+           flag == L"/structure_dir" ||
+           flag == L"/structure_bg" ||
+           flag == L"/extract" ||
+           flag == L"/unpack" ||
+           flag == L"/unlock" ||
+           flag == L"/encoding" ||
+           flag == L"/claudecode" ||
+           flag == L"/codex" ||
+           flag == L"/opencode" ||
+           flag == L"/restartexplorer" ||
+           flag == L"/flushdns" ||
+           flag == L"/openregedit" ||
+           flag == L"/openhosts" ||
+           flag == L"/cleariconcache" ||
+           flag == L"/addtostart" ||
+           flag == L"/diskcleanup" ||
+           flag == L"/fw_out_block" ||
+           flag == L"/fw_in_block" ||
+           flag == L"/fw_out_allow" ||
+           flag == L"/fw_in_allow" ||
+           flag == L"/hash" ||
+           flag == L"/takeown" ||
+           flag == L"/clearreadonly" ||
+           flag == L"/superdelete" ||
+           flag == L"/superdelete_worker" ||
+           flag == L"/cleanempty" ||
+           flag == L"/theme-watcher";
+}
+
+DWORD GetCommandLifetimeLimitMs(const std::wstring& flag) {
+    if (flag == L"/theme-watcher") {
+        return 0;
+    }
+    if (flag == L"/superdelete" || flag == L"/superdelete_worker") {
+        return SUPERDELETE_PROCESS_LIFETIME_MS;
+    }
+    if (flag == L"/hash" || flag == L"/encoding" ||
+        flag == L"/extract" || flag == L"/unpack" ||
+        flag == L"/cleanempty" || flag == L"/takeown" ||
+        flag == L"/clearreadonly") {
+        return LONG_PROCESS_LIFETIME_MS;
+    }
+    return DEFAULT_PROCESS_LIFETIME_MS;
+}
+
+DWORD GetProcessLifetimeLimitMs() {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    DWORD timeoutMs = 0;
+    if (argv) {
+        if (argc > 1) {
+            const std::wstring flag = argv[1];
+            if (IsKnownCommandFlag(flag)) {
+                timeoutMs = GetCommandLifetimeLimitMs(flag);
+            }
+        }
+        LocalFree(argv);
+    }
+    return timeoutMs;
+}
+
+DWORD WINAPI ProcessLifetimeLimitThread(LPVOID param) {
+    const DWORD timeoutMs = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(param));
+    for (DWORD elapsed = 0; elapsed < timeoutMs; elapsed += 250) {
         Sleep(250);
     }
     while (ModernMsgBox::HasActiveDialog()) {
@@ -26,7 +97,12 @@ DWORD WINAPI ProcessLifetimeLimitThread(LPVOID) {
 }
 
 void StartProcessLifetimeLimit() {
-    HANDLE thread = CreateThread(nullptr, 0, ProcessLifetimeLimitThread, nullptr, 0, nullptr);
+    const DWORD lifetimeMs = GetProcessLifetimeLimitMs();
+    if (lifetimeMs == 0) return;
+
+    HANDLE thread = CreateThread(nullptr, 0, ProcessLifetimeLimitThread,
+                                 reinterpret_cast<LPVOID>(static_cast<ULONG_PTR>(lifetimeMs)),
+                                 0, nullptr);
     if (thread) CloseHandle(thread);
 }
 
@@ -98,10 +174,7 @@ bool RelaunchSelfElevated(const std::vector<std::wstring>& args) {
 }
 
 bool CommandRequiresElevation(const std::wstring& flag) {
-    return flag != L"/claudecode" &&
-           flag != L"/codex" &&
-           flag != L"/openhosts" &&
-           flag != L"/superdelete";
+    return flag == L"/superdelete_worker";
 }
 
 }
@@ -136,36 +209,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
         return VitraLocalization::PickString(en, cn);
     };
 
-    auto isKnownCommandFlag = [](const std::wstring& flag) -> bool {
-        return flag == L"/copypath" ||
-               flag == L"/rename" ||
-               flag == L"/createfolder" ||
-               flag == L"/structure_dir" ||
-               flag == L"/structure_bg" ||
-               flag == L"/extract" ||
-               flag == L"/unpack" ||
-               flag == L"/unlock" ||
-               flag == L"/encoding" ||
-               flag == L"/claudecode" ||
-               flag == L"/codex" ||
-               flag == L"/restartexplorer" ||
-               flag == L"/flushdns" ||
-               flag == L"/openregedit" ||
-               flag == L"/openhosts" ||
-               flag == L"/cleariconcache" ||
-               flag == L"/addtostart" ||
-               flag == L"/diskcleanup" ||
-               flag == L"/fw_out_block" ||
-               flag == L"/fw_in_block" ||
-               flag == L"/fw_out_allow" ||
-               flag == L"/fw_in_allow" ||
-               flag == L"/hash" ||
-               flag == L"/takeown" ||
-               flag == L"/clearreadonly" ||
-               flag == L"/superdelete" ||
-               flag == L"/superdelete_worker" ||
-               flag == L"/cleanempty";
-    };
+    if (args.size() > 1 && args[1] == L"/theme-watcher") {
+        return ThemeIconManager::RunWatcher();
+    }
 
     // Log all received arguments for debugging
     if (args.size() > 1) {
@@ -176,7 +222,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
         FeatureManager::LogResult(L"Startup", argsLog, true);
 
         std::wstring flag = args[1];
-        if (!isKnownCommandFlag(flag)) {
+        if (!IsKnownCommandFlag(flag)) {
             FeatureManager::LogResult(L"IgnoredFlag", flag, true, L"Unknown external argument; launching UI mode");
         } else {
             if (CommandRequiresElevation(flag) && !IsRunningElevated()) {
@@ -287,6 +333,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR /*pCmdLine*/, int /*nC
             if (flag == L"/codex") {
                 std::wstring dir = target.empty() ? FeatureManager::GetExeDir() : target;
                 FeatureManager::OpenCodex(dir);
+                return 0;
+            }
+
+            if (flag == L"/opencode") {
+                std::wstring dir = target.empty() ? FeatureManager::GetExeDir() : target;
+                FeatureManager::OpenOpenCode(dir);
                 return 0;
             }
 

@@ -6,6 +6,7 @@
  */
 
 #include "../include/UIManager.h"
+#include "../include/ThemeIconManager.h"
 #include "../resource.h"
 #include <commctrl.h>
 #include <d2d1helper.h>
@@ -348,6 +349,8 @@ static std::map<std::wstring, TranslationEntry> g_translations = {
     { L"Claude Code Desc", { L"Open a Command Prompt in this folder and launch Claude Code", L"\u5728\u6b64\u6587\u4ef6\u5939\u4e2d\u6253\u5f00\u547d\u4ee4\u63d0\u793a\u7b26\u5e76\u542f\u52a8 Claude Code" } },
     { L"Codex", { L"Codex", L"Codex" } },
     { L"Codex Desc", { L"Open a Command Prompt in this folder and launch Codex", L"\u5728\u6b64\u6587\u4ef6\u5939\u4e2d\u6253\u5f00\u547d\u4ee4\u63d0\u793a\u7b26\u5e76\u542f\u52a8 Codex" } },
+    { L"OpenCode", { L"OpenCode", L"OpenCode" } },
+    { L"OpenCode Desc", { L"Open a Command Prompt in this folder and launch OpenCode", L"\u5728\u6b64\u6587\u4ef6\u5939\u4e2d\u6253\u5f00\u547d\u4ee4\u63d0\u793a\u7b26\u5e76\u542f\u52a8 OpenCode" } },
     { L"Restart Explorer", { L"Restart Explorer", L"\u91cd\u542f\u8d44\u6e90\u7ba1\u7406\u5668" } },
     { L"Restart Explorer Desc", { L"Terminate and restart Windows Explorer to apply shell changes", L"\u7ec8\u6b62\u5e76\u91cd\u542f Windows \u8d44\u6e90\u7ba1\u7406\u5668\u4ee5\u5e94\u7528 Shell \u66f4\u6539" } },
     { L"Flush DNS Cache", { L"Flush DNS Cache", L"\u5237\u65b0 DNS \u7f13\u5b58" } },
@@ -443,7 +446,7 @@ void UIManager::BuildMenuItems() {
         item.keyName = key;
         item.command = cmd;
         item.resId = resId;
-        item.icon = (resId != 0) ? (exePath + L",-" + std::to_wstring(resId)) : L"";
+        item.icon = ThemeIconManager::IconReference(exePath, resId);
         item.scope = scope;
         item.badge = badge;
         m_items.push_back(item);
@@ -459,11 +462,11 @@ void UIManager::BuildMenuItems() {
         MenuItemUI item;
         item.keyName = L"Quick Rename"; item.hasSubMenu = true;
         item.resId = IDI_ICON_RENAME;
-        item.icon = exePath + L",-" + std::to_wstring(item.resId);
+        item.icon = ThemeIconManager::IconReference(exePath, item.resId);
         item.scope = RegistryManager::BothFileFolder;
         item.subItems = {
-            { L"Date Prefix", L"/rename 1", L"" },
-            { L"Date Suffix", L"/rename 2", L"" }
+            { L"Date Prefix", L"/rename 1", ThemeIconManager::IconReference(exePath, IDI_ICON_RENAME_PREFIX), IDI_ICON_RENAME_PREFIX },
+            { L"Date Suffix", L"/rename 2", ThemeIconManager::IconReference(exePath, IDI_ICON_RENAME_SUFFIX), IDI_ICON_RENAME_SUFFIX }
         };
         m_items.push_back(item);
     }
@@ -471,14 +474,14 @@ void UIManager::BuildMenuItems() {
         MenuItemUI item;
         item.keyName = L"Convert Encoding"; item.hasSubMenu = true;
         item.resId = IDI_ICON_ENCODING;
-        item.icon = exePath + L",-" + std::to_wstring(item.resId);
+        item.icon = ThemeIconManager::IconReference(exePath, item.resId);
         item.scope = RegistryManager::Files;
         item.subItems = {
-            { L"UTF-8",     L"/encoding utf-8",     L"" },
-            { L"UTF-8 BOM", L"/encoding utf-8-bom", L"" },
-            { L"ANSI",      L"/encoding ansi",      L"" },
-            { L"UTF-16 LE", L"/encoding utf-16le",  L"" },
-            { L"UTF-16 BE", L"/encoding utf-16be",  L"" }
+            { L"UTF-8",     L"/encoding utf-8",     ThemeIconManager::IconReference(exePath, IDI_ICON_ENCODING_UTF8), IDI_ICON_ENCODING_UTF8 },
+            { L"UTF-8 BOM", L"/encoding utf-8-bom", ThemeIconManager::IconReference(exePath, IDI_ICON_ENCODING_UTF8_BOM), IDI_ICON_ENCODING_UTF8_BOM },
+            { L"ANSI",      L"/encoding ansi",      ThemeIconManager::IconReference(exePath, IDI_ICON_ENCODING_ANSI), IDI_ICON_ENCODING_ANSI },
+            { L"UTF-16 LE", L"/encoding utf-16le",  ThemeIconManager::IconReference(exePath, IDI_ICON_ENCODING_UTF16_LE), IDI_ICON_ENCODING_UTF16_LE },
+            { L"UTF-16 BE", L"/encoding utf-16be",  ThemeIconManager::IconReference(exePath, IDI_ICON_ENCODING_UTF16_BE), IDI_ICON_ENCODING_UTF16_BE }
         };
         m_items.push_back(item);
     }
@@ -487,13 +490,13 @@ void UIManager::BuildMenuItems() {
         item.keyName = L"File Hash";
         item.hasSubMenu = true;
         item.resId = IDI_ICON_HASH;
-        item.icon = exePath + L",-" + std::to_wstring(item.resId);
+        item.icon = ThemeIconManager::IconReference(exePath, item.resId);
         item.scope = RegistryManager::Files;
         item.multiSelectModel = L"Single";
         item.subItems = {
-            { L"MD5",    L"/hash md5",    L"" },
-            { L"SHA-1",  L"/hash sha1",  L"" },
-            { L"SHA-256", L"/hash sha256", L"" }
+            { L"MD5",    L"/hash md5",    ThemeIconManager::IconReference(exePath, IDI_ICON_HASH_MD5), IDI_ICON_HASH_MD5 },
+            { L"SHA-1",  L"/hash sha1",   ThemeIconManager::IconReference(exePath, IDI_ICON_HASH_SHA1), IDI_ICON_HASH_SHA1 },
+            { L"SHA-256", L"/hash sha256", ThemeIconManager::IconReference(exePath, IDI_ICON_HASH_SHA256), IDI_ICON_HASH_SHA256 }
         };
         item.badge = L"NEW";
         m_items.push_back(item);
@@ -512,6 +515,7 @@ void UIManager::BuildMenuItems() {
     // ===== New system utility items =====
     add(L"Claude Code",         L"/claudecode",       IDI_ICON_CLAUDE, RegistryManager::DirAndBackground, L"NEW");
     add(L"Codex",               L"/codex",            IDI_ICON_CODEX, RegistryManager::DirAndBackground, L"NEW");
+    add(L"OpenCode",            L"/opencode",         IDI_ICON_OPENCODE, RegistryManager::DirAndBackground, L"NEW");
     add(L"Restart Explorer",    L"/restartexplorer",  IDI_ICON_RESTART, RegistryManager::Background, L"NEW");
     add(L"Flush DNS Cache",     L"/flushdns",         IDI_ICON_DNS, RegistryManager::Background, L"NEW");
     add(L"Open Registry Editor", L"/openregedit",     IDI_ICON_REGEDIT, RegistryManager::Background, L"NEW");
@@ -523,7 +527,7 @@ void UIManager::BuildMenuItems() {
         item.keyName = L"Pin to Start Menu";
         item.command = L"/addtostart";
         item.resId = IDI_ICON_STARTMENU;
-        item.icon = exePath + L",-" + std::to_wstring(item.resId);
+        item.icon = ThemeIconManager::IconReference(exePath, item.resId);
         item.scope = RegistryManager::Files;
         item.appliesTo = L".exe OR .lnk"; 
         item.badge = L"NEW";
@@ -537,14 +541,14 @@ void UIManager::BuildMenuItems() {
         item.keyName = L"Firewall Rules";
         item.hasSubMenu = true;
         item.resId = IDI_ICON_FIREWALL;
-        item.icon = exePath + L",-" + std::to_wstring(item.resId);
+        item.icon = ThemeIconManager::IconReference(exePath, item.resId);
         item.scope = RegistryManager::Files;
         item.appliesTo = L".exe";
         item.subItems = {
-            { L"Block outbound", L"/fw_out_block", L"" },
-            { L"Block inbound", L"/fw_in_block", L"" },
-            { L"Allow outbound", L"/fw_out_allow", L"" },
-            { L"Allow inbound", L"/fw_in_allow", L"" }
+            { L"Block outbound", L"/fw_out_block", ThemeIconManager::IconReference(exePath, IDI_ICON_FW_BLOCK_OUT), IDI_ICON_FW_BLOCK_OUT },
+            { L"Block inbound", L"/fw_in_block", ThemeIconManager::IconReference(exePath, IDI_ICON_FW_BLOCK_IN), IDI_ICON_FW_BLOCK_IN },
+            { L"Allow outbound", L"/fw_out_allow", ThemeIconManager::IconReference(exePath, IDI_ICON_FW_ALLOW_OUT), IDI_ICON_FW_ALLOW_OUT },
+            { L"Allow inbound", L"/fw_in_allow", ThemeIconManager::IconReference(exePath, IDI_ICON_FW_ALLOW_IN), IDI_ICON_FW_ALLOW_IN }
         };
         item.badge = L"NEW";
         m_items.push_back(item);
@@ -778,6 +782,10 @@ bool UIManager::InitializeWindow() {
     ApplyWindowEffects();
     ShowWindow(m_hwnd, SW_SHOW);
     UpdateWindow(m_hwnd);
+    if (ThemeIconManager::HasAnyInstalledMenus()) {
+        ThemeIconManager::RefreshInstalledIcons();
+        ThemeIconManager::EnsureWatcherRunning();
+    }
     return true;
 }
 
@@ -1400,6 +1408,7 @@ void UIManager::ApplySingleItem(MenuItemUI& target, bool install) {
 
 bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring& exe, bool countResults, int& count, int& fail) {
     const std::wstring localizedName = GetString(item.keyName);
+    const std::wstring currentIcon = ThemeIconManager::IconReference(item.resId);
 
     if (item.keyName == L"Disk Cleanup") {
         RegistryManager::UninstallContextMenuItem(GetString(L"Disk Cleanup"), RegistryManager::Drive);
@@ -1418,7 +1427,7 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
     };
 
     if (item.hasSubMenu) {
-        bool parentOk = RegistryManager::CreateParentMenu(item.keyName, item.scope, item.icon, item.appliesTo,
+        bool parentOk = RegistryManager::CreateParentMenu(item.keyName, item.scope, currentIcon, item.appliesTo,
                                                           localizedName, item.multiSelectModel);
         FeatureManager::LogResult(L"InstallParent", localizedName, parentOk);
 
@@ -1427,7 +1436,8 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
         for (const auto& sub : item.subItems) {
             std::wstring subLocName = GetString(sub.keyName);
             std::wstring cmd = BuildCommandLine(exe, sub.command, useBackgroundPath);
-            bool res = RegistryManager::InstallSubMenuItem(item.keyName, sub.keyName, cmd, item.scope, sub.icon,
+            const std::wstring subIcon = ThemeIconManager::IconReference(sub.resId);
+            bool res = RegistryManager::InstallSubMenuItem(item.keyName, sub.keyName, cmd, item.scope, subIcon,
                                                            subLocName, item.multiSelectModel);
             FeatureManager::LogResult(L"InstallSub", subLocName, res, L"Cmd: " + cmd);
             allOk = allOk && res;
@@ -1439,9 +1449,9 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
     if (item.scope == RegistryManager::DirAndBackground) {
         std::wstring cmdBg = BuildLeafItemCommand(item, exe, RegistryManager::Background);
         std::wstring cmdDir = BuildLeafItemCommand(item, exe, RegistryManager::Directory);
-        bool resBg = RegistryManager::InstallContextMenuItem(item.keyName, cmdBg, RegistryManager::Background, item.icon,
+        bool resBg = RegistryManager::InstallContextMenuItem(item.keyName, cmdBg, RegistryManager::Background, currentIcon,
                                                              L"", item.appliesTo, localizedName, item.multiSelectModel);
-        bool resDir = RegistryManager::InstallContextMenuItem(item.keyName, cmdDir, RegistryManager::Directory, item.icon,
+        bool resDir = RegistryManager::InstallContextMenuItem(item.keyName, cmdDir, RegistryManager::Directory, currentIcon,
                                                               L"", item.appliesTo, localizedName, item.multiSelectModel);
         FeatureManager::LogResult(L"InstallItem", localizedName + L" [BG]", resBg, L"Cmd: " + cmdBg);
         FeatureManager::LogResult(L"InstallItem", localizedName + L" [Dir]", resDir, L"Cmd: " + cmdDir);
@@ -1452,7 +1462,7 @@ bool UIManager::WriteMenuItemRegistry(const MenuItemUI& item, const std::wstring
     RegistryManager::Scope commandScope =
         (item.scope == RegistryManager::Background) ? RegistryManager::Background : RegistryManager::Directory;
     std::wstring cmd = BuildLeafItemCommand(item, exe, commandScope);
-    bool res = RegistryManager::InstallContextMenuItem(item.keyName, cmd, item.scope, item.icon, L"", item.appliesTo,
+    bool res = RegistryManager::InstallContextMenuItem(item.keyName, cmd, item.scope, currentIcon, L"", item.appliesTo,
                                                        localizedName, item.multiSelectModel);
     FeatureManager::LogResult(L"InstallItem", localizedName, res, L"Cmd: " + cmd);
     addResult(res);
@@ -1469,6 +1479,8 @@ void UIManager::DoInstall() {
         if (item.installed) continue;
         WriteMenuItemRegistry(item, exe, true, count, fail);
     }
+    ThemeIconManager::RefreshInstalledIcons(path);
+    ThemeIconManager::EnsureWatcherRunning(path);
 
     CheckInstalledStatus();
     if (count == 0 && fail == 0) {
@@ -1491,6 +1503,8 @@ void UIManager::DoReinstall() {
         if (!item.installed) continue;
         WriteMenuItemRegistry(item, exe, true, count, fail);
     }
+    ThemeIconManager::RefreshInstalledIcons(path);
+    ThemeIconManager::EnsureWatcherRunning(path);
 
     CheckInstalledStatus();
     if (count == 0 && fail == 0) {
@@ -1531,6 +1545,12 @@ void UIManager::DoUninstall() {
     }
 
     CheckInstalledStatus();
+    if (ThemeIconManager::HasAnyInstalledMenus()) {
+        ThemeIconManager::RefreshInstalledIcons();
+        ThemeIconManager::EnsureWatcherRunning();
+    } else {
+        ThemeIconManager::DisableWatcherIfUnused();
+    }
 
     int success = 0;
     int fail = 0;
@@ -1575,6 +1595,8 @@ void UIManager::UpdateRegistryLanguage() {
             WriteMenuItemRegistry(item, exe, false, ignoredCount, ignoredFail);
         }
     }
+    ThemeIconManager::RefreshInstalledIcons(path);
+    ThemeIconManager::EnsureWatcherRunning(path);
 }
 
 void UIManager::LoadSettings() {

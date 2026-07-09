@@ -24,6 +24,7 @@ public:
     // -- System Tools (direct execute, no registry) --
     static bool OpenClaudeCode(const std::wstring& folderPath);
     static bool OpenCodex(const std::wstring& folderPath);
+    static bool OpenOpenCode(const std::wstring& folderPath);
     static bool RestartExplorer();
     static bool FlushDNS();
     static bool OpenRegistryEditor();
