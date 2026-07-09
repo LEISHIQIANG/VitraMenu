@@ -88,13 +88,19 @@ void ShadowWindow::CreateShadowWindow()
 {
     RegisterShadowClass();
 
+    HWND hOwner = nullptr;
+    if (m_hMainWnd)
+    {
+        hOwner = GetWindow(m_hMainWnd, GW_OWNER);
+    }
+
     m_hShadowWnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         L"WinLauncherShadow",
         L"",
         WS_POPUP,
         CW_USEDEFAULT, CW_USEDEFAULT, 100, 100,
-        nullptr, // No owner - managed Z-order manually
+        hOwner, // Use same owner as target window to stay in same Z-order group
         nullptr,
         GetModuleHandle(nullptr),
         nullptr
@@ -272,11 +278,22 @@ void ShadowWindow::GenerateShadowBitmap(int w, int h, int radius, int margin, in
     BYTE gColor = GetGValue(color);
     BYTE bColor = GetBValue(color);
 
+    float scale = DpiHelper::GetWindowScale(m_hMainWnd);
+    float shrink = 1.5f * scale;
+    float mainRx = (float)(margin - offsetX) + shrink;
+    float mainRy = (float)(margin - offsetY) + shrink;
+    float mainRw = (float)w - 2.0f * shrink;
+    float mainRh = (float)h - 2.0f * shrink;
+    float mainR = cornerRadius - shrink;
+    if (mainR < 0.0f) mainR = 0.0f;
+
     for (int y = 0; y < shadowHeight; ++y)
     {
         int rowOffset = y * shadowWidth;
+        float fy = (float)y;
         for (int x = 0; x < shadowWidth; ++x)
         {
+            float fx = (float)x;
             float val = 0.0f;
             for (int k = -radius; k <= radius; ++k)
             {
@@ -287,6 +304,11 @@ void ShadowWindow::GenerateShadowBitmap(int w, int h, int radius, int margin, in
             }
 
             BYTE finalAlpha = (BYTE)(val * opacity);
+            if (IsPointInRoundedRect(fx, fy, mainRx, mainRy, mainRw, mainRh, mainR))
+            {
+                finalAlpha = 0;
+            }
+
             BYTE rOut = (BYTE)((int)rColor * finalAlpha / 255);
             BYTE gOut = (BYTE)((int)gColor * finalAlpha / 255);
             BYTE bOut = (BYTE)((int)bColor * finalAlpha / 255);

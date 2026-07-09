@@ -1582,7 +1582,7 @@ LRESULT CALLBACK DateFolderSettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     }
     case WM_ACTIVATE:
         if (state && state->shadowWindow) {
-            state->shadowWindow->SyncPosition(LOWORD(wParam) != WA_INACTIVE);
+            state->shadowWindow->SyncPosition(true);
         }
         break;
     case WM_SHOWWINDOW:
@@ -1834,7 +1834,7 @@ static std::map<std::wstring, TranslationEntry> g_translations = {
     { L"Clean Empty Folders", { L"Clean Empty Folders", L"\u6e05\u7406\u7a7a\u6587\u4ef6\u5939" } },
     { L"Clean Empty Folders Desc", { L"Recursively find and delete all empty folders in the selected directory", L"\u9012\u5f52\u67e5\u627e\u5e76\u5220\u9664\u6240\u9009\u76ee\u5f55\u4e2d\u7684\u6240\u6709\u7a7a\u6587\u4ef6\u5939" } },
     { L"Create Date Folder", { L"Create Date Folder", L"\u521b\u5efa\u65e5\u671f\u6587\u4ef6\u5939" } },
-    { L"Create Date Folder Desc", { L"Create a new folder named with today's date in YYYY_MM_DD format", L"\u6309 YYYY_MM_DD \u683c\u5f0f\u521b\u5efa\u4ee5\u5f53\u5929\u65e5\u671f\u547d\u540d\u7684\u65b0\u6587\u4ef6\u5939" } },
+    { L"Create Date Folder Desc", { L"Create a new folder named with today's date", L"\u521b\u5efa\u4ee5\u5f53\u5929\u65e5\u671f\u547d\u540d\u7684\u65b0\u6587\u4ef6\u5939" } },
     { L"Extract Structure", { L"Extract Structure", L"\u63d0\u53d6\u76ee\u5f55\u7ed3\u6784" } },
     { L"Extract Structure Desc", { L"Export the complete folder tree structure to a text file", L"\u5c06\u5b8c\u6574\u7684\u6587\u4ef6\u5939\u6811\u7ed3\u6784\u5bfc\u51fa\u4e3a\u6587\u672c\u6587\u4ef6" } },
     { L"Extract All Files", { L"Extract All Files", L"\u63d0\u53d6\u6240\u6709\u6587\u4ef6" } },
@@ -2834,17 +2834,10 @@ void UIManager::OnLButtonDown(int x, int y) {
             return;
         }
 
-        // Card click toggles the per-item switch
+        // Card click handles the per-item switch ONLY if clicking the right toggle button
         for (size_t i = 0; i < m_items.size(); ++i) {
             auto& item = m_items[i];
-            if (IsPointInRect(item.rect, x, y)) {
-                if (item.configurable) {
-                    CancelPendingCardClick();
-                    m_hasPendingCardClick = true;
-                    m_pendingCardClickIndex = i;
-                    SetTimer(m_hwnd, CARD_CLICK_TIMER_ID, GetDoubleClickTime(), nullptr);
-                    return;
-                }
+            if (IsPointInRect(item.toggleRect, x, y)) {
                 ApplySingleItem(item, !item.installed);
                 return;
             }
@@ -3356,7 +3349,7 @@ LRESULT CALLBACK UIManager::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         }
         case WM_ACTIVATE:
             if (pThis->m_shadowWindow) {
-                pThis->m_shadowWindow->SyncPosition(LOWORD(wParam) != WA_INACTIVE);
+                pThis->m_shadowWindow->SyncPosition(true);
             }
             break;
         case WM_SHOWWINDOW:
